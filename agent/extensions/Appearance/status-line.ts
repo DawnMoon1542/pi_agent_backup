@@ -2,7 +2,10 @@
 // @category: ui
 // @description: 彩色显示模型、上下文、TPS 和 git 状态
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { InteractiveMode, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 type Ctx = Parameters<Parameters<ExtensionAPI["on"]>[1]>[1];
 
@@ -17,6 +20,8 @@ type GitInfo =
       untracked: number;
     };
 
+const SETTINGS_PATH = join(homedir(), ".pi", "agent", "settings.json");
+
 const RESET = "\x1b[0m";
 const MODEL = "\x1b[38;5;183m";
 const PROGRESS = "\x1b[38;5;111m";
@@ -27,9 +32,87 @@ const TOKEN = "\x1b[38;5;146m";
 const DIR = "\x1b[38;5;150m";
 const GIT = "\x1b[38;5;183m";
 const DIM = "\x1b[2m";
+const DIM_OFF = "\x1b[22m";
+const PILL_ACTIVE_BG = "\x1b[48;5;238m";
+const PILL_INACTIVE_BG = "";
+
+const SHORTCUT_PATCHED = Symbol.for("pi.extensions.status-line.shortcutState.patched");
+const SHORTCUT_ORIGINAL_SET_TOOLS = Symbol.for("pi.extensions.status-line.shortcutState.originalSetToolsExpanded");
+const SHORTCUT_ORIGINAL_TOGGLE_THINKING = Symbol.for("pi.extensions.status-line.shortcutState.originalToggleThinking");
+const SHORTCUT_LISTENERS = Symbol.for("pi.extensions.status-line.shortcutState.listeners");
 
 function color(text: string, c: string): string {
   return `${c}${text}${RESET}`;
+}
+
+function shortcutPill(keyText: string, label: string, active: boolean): string {
+  const bg = active ? PILL_ACTIVE_BG : PILL_INACTIVE_BG;
+  return `${bg} ${DIM}${keyText}${DIM_OFF} ${label} ${RESET}`;
+}
+
+function readThinkingHidden(): boolean {
+  if (!existsSync(SETTINGS_PATH)) return false;
+  try {
+    const settings = JSON.parse(readFileSync(SETTINGS_PATH, "utf8") || "{}");
+    return settings.hideThinkingBlock === true;
+  } catch {
+    return false;
+  }
+}
+
+type ShortcutStateListener = (state: { toolsExpanded?: boolean; thinkingHidden?: boolean }) => void;
+
+type PatchableInteractiveModePrototype = {
+  [SHORTCUT_PATCHED]?: boolean;
+  [SHORTCUT_ORIGINAL_SET_TOOLS]?: (expanded: boolean) => void;
+  [SHORTCUT_ORIGINAL_TOGGLE_THINKING]?: () => void;
+  setToolsExpanded?: (expanded: boolean) => void;
+  toggleThinkingBlockVisibility?: () => void;
+};
+
+type PatchableInteractiveModeInstance = {
+  toolOutputExpanded?: boolean;
+  hideThinkingBlock?: boolean;
+};
+
+function shortcutStateListeners(): Set<ShortcutStateListener> {
+  const store = globalThis as typeof globalThis & { [SHORTCUT_LISTENERS]?: Set<ShortcutStateListener> };
+  if (!store[SHORTCUT_LISTENERS]) store[SHORTCUT_LISTENERS] = new Set<ShortcutStateListener>();
+  return store[SHORTCUT_LISTENERS];
+}
+
+function emitShortcutState(state: { toolsExpanded?: boolean; thinkingHidden?: boolean }): void {
+  for (const listener of shortcutStateListeners()) {
+    try {
+      listener(state);
+    } catch {
+    }
+  }
+}
+
+function patchShortcutStateHooks(): void {
+  const proto = (InteractiveMode as any).prototype as PatchableInteractiveModePrototype;
+  if (proto[SHORTCUT_PATCHED]) return;
+
+  const originalSetToolsExpanded = proto.setToolsExpanded;
+  if (typeof originalSetToolsExpanded === "function") {
+    proto[SHORTCUT_ORIGINAL_SET_TOOLS] = originalSetToolsExpanded;
+    proto.setToolsExpanded = function patchedSetToolsExpanded(this: PatchableInteractiveModeInstance, expanded: boolean): void {
+      originalSetToolsExpanded.call(this, expanded);
+      emitShortcutState({ toolsExpanded: Boolean(this.toolOutputExpanded ?? expanded) });
+    };
+  }
+
+  const originalToggleThinking = proto.toggleThinkingBlockVisibility;
+  if (typeof originalToggleThinking === "function") {
+    proto[SHORTCUT_ORIGINAL_TOGGLE_THINKING] = originalToggleThinking;
+    proto.toggleThinkingBlockVisibility = function patchedToggleThinking(this: PatchableInteractiveModeInstance): void {
+      originalToggleThinking.call(this);
+      emitShortcutState({ thinkingHidden: Boolean(this.hideThinkingBlock) });
+    };
+  }
+
+  proto[SHORTCUT_PATCHED] = true;
 }
 
 function progressColor(percent: number): string {
@@ -128,6 +211,8 @@ function truncateAnsi(s: string, width: number): string {
 }
 
 export default function (pi: ExtensionAPI) {
+  patchShortcutStateHooks();
+
   let gitInfo: GitInfo = { inRepo: false };
   let gitRefreshInFlight = false;
   let turnCount = 0;
@@ -140,12 +225,45 @@ export default function (pi: ExtensionAPI) {
   let requestFooterRender: (() => void) | undefined;
   let currentCtx: Ctx | undefined;
   let statusVisible = true;
+  let toolsExpanded = false;
+  let thinkingHidden = readThinkingHidden();
+  let offShortcutStateInput: (() => void) | undefined;
 
-  function setWhichKeyWidget(ctx: Ctx): void {
+  function syncShortcutStates(ctx: Ctx): void {
+    toolsExpanded = ctx.ui.getToolsExpanded();
+    thinkingHidden = readThinkingHidden();
+  }
+
+  function shortcutStateLine(): string {
+    const tools = shortcutPill("Ctrl+O", "tools", toolsExpanded);
+    const thinking = shortcutPill("Ctrl+T", "thinking", !thinkingHidden);
     const key = (s: string) => color(s, DIM);
-    ctx.ui.setWidget("status-line-which-key", [
-      `${key("Ctrl+L")} model  ${key("Ctrl+T")} thinking  ${key("Ctrl+G")} editor  ${key("Shift+Enter")} newline  ${key("Ctrl+V")} paste image`,
-    ], { placement: "aboveEditor" });
+    return `${tools} ${thinking}  ${key("Ctrl+L")} model  ${key("Ctrl+G")} editor  ${key("Ctrl+V")} paste image`;
+  }
+
+  function setWhichKeyWidget(ctx: Ctx, options: { sync?: boolean } = {}): void {
+    if (options.sync !== false) syncShortcutStates(ctx);
+    ctx.ui.setWidget("status-line-which-key", [shortcutStateLine()], { placement: "aboveEditor" });
+  }
+
+  function refreshShortcutStateDisplay(ctx: Ctx, options: { sync?: boolean } = {}): void {
+    setWhichKeyWidget(ctx, options);
+    render(ctx, true);
+  }
+
+  function installShortcutStateDetector(): void {
+    offShortcutStateInput?.();
+    const listener: ShortcutStateListener = (state) => {
+      if (state.toolsExpanded !== undefined) toolsExpanded = state.toolsExpanded;
+      if (state.thinkingHidden !== undefined) thinkingHidden = state.thinkingHidden;
+      if (!currentCtx || !statusVisible) return;
+      refreshShortcutStateDisplay(currentCtx, { sync: false });
+    };
+    const listeners = shortcutStateListeners();
+    listeners.add(listener);
+    offShortcutStateInput = () => {
+      listeners.delete(listener);
+    };
   }
 
   function installFooter(ctx: Ctx): void {
@@ -169,6 +287,7 @@ export default function (pi: ExtensionAPI) {
     });
     ctx.ui.setStatus("status-widget", undefined);
     ctx.ui.setWidget("status-widget", undefined);
+    installShortcutStateDetector();
     setWhichKeyWidget(ctx);
   }
 
@@ -358,6 +477,8 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_shutdown", async (_event, ctx) => {
     if (deferredRender) clearTimeout(deferredRender);
     offStatusVisible();
+    offShortcutStateInput?.();
+    offShortcutStateInput = undefined;
     ctx.ui.setFooter(undefined);
     ctx.ui.setStatus("status-widget", undefined);
     ctx.ui.setWidget("status-widget", undefined);
