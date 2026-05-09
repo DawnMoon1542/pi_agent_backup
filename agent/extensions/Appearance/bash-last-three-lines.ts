@@ -7,6 +7,8 @@ import { createBashTool } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, wrapTextWithAnsi, type Component } from "@earendil-works/pi-tui";
 
 const PREVIEW_LINES = 3;
+const EXPAND_HINT = "Ctrl+O to expand";
+
 type TextPart = {
   type?: string;
   text?: string;
@@ -19,28 +21,44 @@ type BashArgs = {
 
 type PreviewMode = "head" | "tail";
 
-class VisualPreview implements Component {
-  private lines: string[] = [];
-  private expanded = false;
-  private mode: PreviewMode = "tail";
+type VisualSection = {
+  lines: string[];
+  mode: PreviewMode;
+  previewLines: number;
+};
 
-  setContent(lines: string[], options: { expanded: boolean; mode: PreviewMode }): void {
-    this.lines = lines;
+class VisualPreview implements Component {
+  private header = "";
+  private sections: VisualSection[] = [];
+  private footer = "";
+  private expanded = false;
+
+  setContent(options: { header: string; sections: VisualSection[]; footer?: string; expanded: boolean }): void {
+    this.header = options.header;
+    this.sections = options.sections;
+    this.footer = options.footer ?? "";
     this.expanded = options.expanded;
-    this.mode = options.mode;
+  }
+
+  private renderSection(section: VisualSection, width: number): string[] {
+    const wrapped = section.lines.flatMap((line) => wrapTextWithAnsi(line, Math.max(1, width)));
+    if (this.expanded || wrapped.length <= section.previewLines) {
+      return wrapped.map((line) => truncateToWidth(line, width, ""));
+    }
+    const visible = section.mode === "head"
+      ? wrapped.slice(0, section.previewLines)
+      : wrapped.slice(-section.previewLines);
+    return visible.map((line) => truncateToWidth(line, width, ""));
   }
 
   render(width: number): string[] {
-    const wrapped = this.lines.flatMap((line) => wrapTextWithAnsi(line, Math.max(1, width)));
-    if (this.expanded || wrapped.length <= PREVIEW_LINES) {
-      return wrapped.map((line) => truncateToWidth(line, width, ""));
+    const rendered: string[] = [];
+    if (this.header) rendered.push(truncateToWidth(this.header, width, ""));
+    for (const section of this.sections) {
+      rendered.push(...this.renderSection(section, width));
     }
-
-    const visible = this.mode === "head"
-      ? wrapped.slice(0, PREVIEW_LINES)
-      : wrapped.slice(-PREVIEW_LINES);
-
-    return visible.map((line) => truncateToWidth(line, width, ""));
+    if (this.footer) rendered.push(truncateToWidth(this.footer, width, ""));
+    return rendered;
   }
 
   invalidate(): void {}
@@ -73,12 +91,23 @@ function commandLines(args: BashArgs | undefined, theme: any): string[] {
   const commandBody = command.length > 0 ? command : "<empty command>";
   const suffix = timeout == null ? "" : theme.fg("muted", ` (timeout ${timeout}s)`);
   const lines = commandBody.replace(/\t/g, "  ").split("\n");
-  if (lines.length === 0) return [theme.fg("toolTitle", "$ <empty command>")];
+  if (lines.length === 0) return [theme.fg("toolOutput", "$ <empty command>")];
   return lines.map((line, index) => {
     const prefix = index === 0 ? "$ " : "  ";
-    const text = `${prefix}${line}${index === 0 ? suffix : ""}`;
-    return index === 0 ? theme.fg("toolTitle", text) : theme.fg("toolOutput", text);
+    return theme.fg("toolOutput", `${prefix}${line}${index === 0 ? suffix : ""}`);
   });
+}
+
+function bashHeader(theme: any): string {
+  return theme.fg("toolTitle", theme.bold("Bash"));
+}
+
+function outputHeader(theme: any): string {
+  return theme.fg("toolTitle", theme.bold("Output"));
+}
+
+function expandFooter(theme: any): string {
+  return theme.fg("muted", EXPAND_HINT);
 }
 
 export default function (pi: ExtensionAPI) {
@@ -95,21 +124,38 @@ export default function (pi: ExtensionAPI) {
 
     renderCall(args, theme, context) {
       const component = previewComponent(context.lastComponent);
-      component.setContent(commandLines(args as BashArgs | undefined, theme), {
+      component.setContent({
+        header: bashHeader(theme),
+        sections: [
+          {
+            lines: commandLines(args as BashArgs | undefined, theme),
+            mode: context.isPartial ? "tail" : "head",
+            previewLines: PREVIEW_LINES,
+          },
+        ],
+        footer: expandFooter(theme),
         expanded: Boolean(context.expanded),
-        mode: context.isPartial ? "tail" : "head",
       });
       return component;
     },
 
     renderResult(result, options, theme, context) {
       const component = previewComponent(context.lastComponent);
+      const expanded = Boolean(context.expanded ?? options.expanded);
 
       if (context.isError) {
         const output = getTextContent(result) || "bash failed";
-        component.setContent(toDisplayLines(output).map((line) => theme.fg("error", line)), {
-          expanded: Boolean(context.expanded ?? options.expanded),
-          mode: "tail",
+        component.setContent({
+          header: outputHeader(theme),
+          sections: [
+            {
+              lines: toDisplayLines(output).map((line) => theme.fg("error", line)),
+              mode: "tail",
+              previewLines: PREVIEW_LINES,
+            },
+          ],
+          footer: expandFooter(theme),
+          expanded,
         });
         return component;
       }
@@ -119,9 +165,17 @@ export default function (pi: ExtensionAPI) {
         ? toDisplayLines(output).map((line) => theme.fg("toolOutput", line))
         : [theme.fg("muted", "<no output>")];
 
-      component.setContent(lines, {
-        expanded: Boolean(context.expanded ?? options.expanded),
-        mode: "tail",
+      component.setContent({
+        header: outputHeader(theme),
+        sections: [
+          {
+            lines,
+            mode: "tail",
+            previewLines: PREVIEW_LINES,
+          },
+        ],
+        footer: expandFooter(theme),
+        expanded,
       });
       return component;
     },
