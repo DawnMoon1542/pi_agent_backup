@@ -1,10 +1,10 @@
-// @name: bash 仅显示最后三行
+// @name: bash 命令前三行，输出后三行
 // @category: ui
-// @description: 模型调用 bash 时，TUI 中只预览执行结果的最后三行；按 Ctrl+O 展开完整内容。
+// @description: 模型调用 bash 时，TUI 中命令只预览渲染后的前三行，输出只预览渲染后的最后三行；按 Ctrl+O 展开完整内容。
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createBashTool } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth, type Component } from "@earendil-works/pi-tui";
+import { truncateToWidth, wrapTextWithAnsi, type Component } from "@earendil-works/pi-tui";
 
 const PREVIEW_LINES = 3;
 const EXPAND_HINT = "Ctrl+O to expand";
@@ -14,18 +14,55 @@ type TextPart = {
   text?: string;
 };
 
-class FixedLines implements Component {
-  constructor(private text = "") {}
+type BashArgs = {
+  command?: string;
+  timeout?: number;
+};
 
-  setText(text: string): void {
-    this.text = text;
+type PreviewMode = "head" | "tail";
+
+class VisualPreview implements Component {
+  private lines: string[] = [];
+  private expanded = false;
+  private mode: PreviewMode = "tail";
+  private hint = "";
+
+  setContent(lines: string[], options: { expanded: boolean; mode: PreviewMode; hint?: string }): void {
+    this.lines = lines;
+    this.expanded = options.expanded;
+    this.mode = options.mode;
+    this.hint = options.hint ?? "";
   }
 
   render(width: number): string[] {
-    return this.text.split("\n").map((line) => truncateToWidth(line, width, ""));
+    const wrapped = this.lines.flatMap((line) => wrapTextWithAnsi(line, Math.max(1, width)));
+    if (this.expanded || wrapped.length <= PREVIEW_LINES) {
+      return wrapped.map((line) => truncateToWidth(line, width, ""));
+    }
+
+    const visible = this.mode === "head"
+      ? wrapped.slice(0, PREVIEW_LINES)
+      : wrapped.slice(-PREVIEW_LINES);
+
+    if (this.hint.length === 0) {
+      return visible.map((line) => truncateToWidth(line, width, ""));
+    }
+
+    if (this.mode === "head") {
+      const lastIndex = visible.length - 1;
+      visible[lastIndex] = truncateToWidth(`${visible[lastIndex]}  … ${this.hint}`, width, "");
+    } else {
+      visible[0] = truncateToWidth(`… ${this.hint}  ${visible[0]}`, width, "");
+    }
+
+    return visible.map((line) => truncateToWidth(line, width, ""));
   }
 
   invalidate(): void {}
+}
+
+function previewComponent(lastComponent: Component | undefined): VisualPreview {
+  return lastComponent instanceof VisualPreview ? lastComponent : new VisualPreview();
 }
 
 function getTextContent(result: unknown): string {
@@ -45,29 +82,65 @@ function toDisplayLines(content: string): string[] {
   return lines.length > 0 ? lines : [""];
 }
 
+function commandLines(args: BashArgs | undefined, theme: any): string[] {
+  const command = typeof args?.command === "string" ? args.command : "";
+  const timeout = typeof args?.timeout === "number" ? args.timeout : undefined;
+  const commandBody = command.length > 0 ? command : "<empty command>";
+  const suffix = timeout == null ? "" : theme.fg("muted", ` (timeout ${timeout}s)`);
+  const lines = commandBody.replace(/\t/g, "  ").split("\n");
+  if (lines.length === 0) return [theme.fg("toolTitle", "$ <empty command>")];
+  return lines.map((line, index) => {
+    const prefix = index === 0 ? "$ " : "  ";
+    const text = `${prefix}${line}${index === 0 ? suffix : ""}`;
+    return index === 0 ? theme.fg("toolTitle", text) : theme.fg("toolOutput", text);
+  });
+}
+
 export default function (pi: ExtensionAPI) {
   const baseBashTool = createBashTool(process.cwd());
 
   pi.registerTool({
     ...baseBashTool,
-    label: "bash (last 3 lines in TUI)",
+    label: "bash (command first 3 TUI lines, output last 3 TUI lines)",
 
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       const bashTool = createBashTool(ctx.cwd);
       return bashTool.execute(toolCallId, params, signal, onUpdate, ctx);
     },
 
-    renderResult(result, _options, theme, context) {
-      const component = (context.lastComponent as FixedLines | undefined) ?? new FixedLines();
-      const output = getTextContent(result);
-      const lines = toDisplayLines(output);
-      const total = output.trimEnd().length > 0 ? lines.length : 0;
-      const skipped = Math.max(0, lines.length - PREVIEW_LINES);
-      const visibleLines = context.expanded ? lines : lines.slice(-PREVIEW_LINES);
-      const styledLines = visibleLines.map((line) => theme.fg("toolOutput", line));
-      const summary = theme.fg("muted", `Output ${total} lines${skipped > 0 ? `, ${EXPAND_HINT}` : ""}`);
+    renderCall(args, theme, context) {
+      const component = previewComponent(context.lastComponent);
+      component.setContent(commandLines(args as BashArgs | undefined, theme), {
+        expanded: Boolean(context.expanded),
+        mode: "head",
+        hint: theme.fg("muted", EXPAND_HINT),
+      });
+      return component;
+    },
 
-      component.setText([...styledLines, summary].join("\n"));
+    renderResult(result, options, theme, context) {
+      const component = previewComponent(context.lastComponent);
+
+      if (context.isError) {
+        const output = getTextContent(result) || "bash failed";
+        component.setContent(toDisplayLines(output).map((line) => theme.fg("error", line)), {
+          expanded: Boolean(context.expanded ?? options.expanded),
+          mode: "tail",
+          hint: theme.fg("muted", EXPAND_HINT),
+        });
+        return component;
+      }
+
+      const output = getTextContent(result);
+      const lines = output.trimEnd().length > 0
+        ? toDisplayLines(output).map((line) => theme.fg("toolOutput", line))
+        : [theme.fg("muted", "<no output>")];
+
+      component.setContent(lines, {
+        expanded: Boolean(context.expanded ?? options.expanded),
+        mode: "tail",
+        hint: theme.fg("muted", EXPAND_HINT),
+      });
       return component;
     },
   });
