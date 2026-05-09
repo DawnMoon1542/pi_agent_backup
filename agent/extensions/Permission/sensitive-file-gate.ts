@@ -4,6 +4,7 @@
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { isToolCallEventType } from "@mariozechner/pi-coding-agent";
+import { confirmOverlay } from "./confirm-overlay";
 
 type Operation = "read" | "write" | "edit";
 
@@ -98,7 +99,8 @@ async function confirmSensitiveFile(ctx: any, operation: Operation, path: string
     edit: "编辑",
   };
 
-  return ctx.ui.confirm(
+  return confirmOverlay(
+    ctx,
     "敏感文件访问确认",
     [
       `检测到 ${opText[operation]} 敏感文件:`,

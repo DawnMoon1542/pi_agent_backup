@@ -4,6 +4,7 @@
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { isToolCallEventType } from "@mariozechner/pi-coding-agent";
+import { confirmOverlay } from "./confirm-overlay";
 
 type Severity = "medium" | "high" | "critical";
 
@@ -257,10 +258,11 @@ export default function (pi: ExtensionAPI) {
 
     if (matches.length === 0) return;
 
-    const ok = await ctx.ui.confirm(
+    const ok = await confirmOverlay(
+      ctx,
       "危险命令检测",
       [
-        "高危 Bash 操作: ",
+        "高危 Bash 操作:",
         formatMatches(matches),
         "",
         "完整命令:",
