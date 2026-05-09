@@ -26,7 +26,8 @@ type DiffLine = {
 type EditRenderState = {
   done?: boolean;
   ranges?: string;
-  body?: DiffLine[];
+  compactBody?: DiffLine[];
+  expandedBody?: DiffLine[];
   changed?: number;
 };
 
@@ -192,6 +193,39 @@ function compactDiffLines(diff: string | undefined): DiffLine[] {
   return out;
 }
 
+function expandedDiffLines(diff: string | undefined): DiffLine[] {
+  if (!diff) return [];
+
+  const out: DiffLine[] = [];
+  let inHunk = false;
+
+  for (const raw of diff.replace(/\r\n/g, "\n").split("\n")) {
+    if (!raw) continue;
+    if (raw.startsWith("diff --git") || raw.startsWith("index ") || raw.startsWith("--- ") || raw.startsWith("+++ ")) continue;
+
+    if (/^@@\s+-\d+(?:,\d+)?\s+\+\d+(?:,\d+)?\s+@@/.test(raw)) {
+      inHunk = true;
+      out.push({ kind: "muted", text: raw });
+      continue;
+    }
+    if (!inHunk) continue;
+
+    if (raw.startsWith("-")) {
+      out.push({ kind: "remove", text: `- ${raw.slice(1)}` });
+      continue;
+    }
+    if (raw.startsWith("+")) {
+      out.push({ kind: "add", text: `+ ${raw.slice(1)}` });
+      continue;
+    }
+    if (raw.startsWith(" ")) {
+      out.push({ kind: "muted", text: `  ${raw.slice(1)}` });
+    }
+  }
+
+  return out;
+}
+
 export default function (pi: ExtensionAPI) {
   const baseEditTool = createEditTool(process.cwd());
 
@@ -229,15 +263,22 @@ export default function (pi: ExtensionAPI) {
       const diff = (result as any)?.details?.diff as string | undefined;
       state.ranges = rangesFromDiff(diff) || state.ranges;
 
-      const diffBody = compactDiffLines(diff);
-      if (diffBody.length > 0) state.body = diffBody;
+      const compactBody = compactDiffLines(diff);
+      const expandedBody = expandedDiffLines(diff);
+      if (compactBody.length > 0) state.compactBody = compactBody;
+      if (expandedBody.length > 0) state.expandedBody = expandedBody;
       if (diff) state.changed = changedLineCount(diff);
 
-      const fullBody = state.body && state.body.length > 0 ? state.body : linesFromArgs(args);
+      const expanded = Boolean(context.expanded ?? options.expanded);
+      const fallbackBody = linesFromArgs(args);
+      const compactSource = state.compactBody && state.compactBody.length > 0 ? state.compactBody : fallbackBody;
+      const expandedSource = state.expandedBody && state.expandedBody.length > 0 ? state.expandedBody : compactSource;
+      const source = expanded ? expandedSource : compactSource;
+      const visible = expanded ? source : collapseToTail(source, false);
       const changed = state.changed && state.changed > 0 ? state.changed : changedCountFromArgs(args);
-      const body = collapseToTail(fullBody, Boolean(options.expanded)).map((line) => styleLine(line, theme));
-      const hasHiddenLines = fullBody.length > PREVIEW_LINES;
-      const showExpandHint = hasHiddenLines && !options.expanded;
+      const body = visible.map((line) => styleLine(line, theme));
+      const hasHiddenLines = expandedSource.length > PREVIEW_LINES;
+      const showExpandHint = hasHiddenLines && !expanded;
       const summary = theme.fg("muted", `Edited ${changed} lines${showExpandHint ? `, ${EXPAND_HINT}` : ""}`);
       return component([...body, summary], context.lastComponent);
     },
