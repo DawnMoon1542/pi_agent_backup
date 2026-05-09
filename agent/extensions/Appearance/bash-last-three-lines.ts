@@ -7,8 +7,6 @@ import { createBashTool } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, wrapTextWithAnsi, type Component } from "@earendil-works/pi-tui";
 
 const PREVIEW_LINES = 3;
-const EXPAND_HINT = "Ctrl+O to expand";
-
 type TextPart = {
   type?: string;
   text?: string;
@@ -25,13 +23,11 @@ class VisualPreview implements Component {
   private lines: string[] = [];
   private expanded = false;
   private mode: PreviewMode = "tail";
-  private hint = "";
 
-  setContent(lines: string[], options: { expanded: boolean; mode: PreviewMode; hint?: string }): void {
+  setContent(lines: string[], options: { expanded: boolean; mode: PreviewMode }): void {
     this.lines = lines;
     this.expanded = options.expanded;
     this.mode = options.mode;
-    this.hint = options.hint ?? "";
   }
 
   render(width: number): string[] {
@@ -43,17 +39,6 @@ class VisualPreview implements Component {
     const visible = this.mode === "head"
       ? wrapped.slice(0, PREVIEW_LINES)
       : wrapped.slice(-PREVIEW_LINES);
-
-    if (this.hint.length === 0) {
-      return visible.map((line) => truncateToWidth(line, width, ""));
-    }
-
-    if (this.mode === "head") {
-      const lastIndex = visible.length - 1;
-      visible[lastIndex] = truncateToWidth(`${visible[lastIndex]}  … ${this.hint}`, width, "");
-    } else {
-      visible[0] = truncateToWidth(`… ${this.hint}  ${visible[0]}`, width, "");
-    }
 
     return visible.map((line) => truncateToWidth(line, width, ""));
   }
@@ -112,8 +97,7 @@ export default function (pi: ExtensionAPI) {
       const component = previewComponent(context.lastComponent);
       component.setContent(commandLines(args as BashArgs | undefined, theme), {
         expanded: Boolean(context.expanded),
-        mode: "head",
-        hint: theme.fg("muted", EXPAND_HINT),
+        mode: context.isPartial ? "tail" : "head",
       });
       return component;
     },
@@ -126,7 +110,6 @@ export default function (pi: ExtensionAPI) {
         component.setContent(toDisplayLines(output).map((line) => theme.fg("error", line)), {
           expanded: Boolean(context.expanded ?? options.expanded),
           mode: "tail",
-          hint: theme.fg("muted", EXPAND_HINT),
         });
         return component;
       }
@@ -139,7 +122,6 @@ export default function (pi: ExtensionAPI) {
       component.setContent(lines, {
         expanded: Boolean(context.expanded ?? options.expanded),
         mode: "tail",
-        hint: theme.fg("muted", EXPAND_HINT),
       });
       return component;
     },
