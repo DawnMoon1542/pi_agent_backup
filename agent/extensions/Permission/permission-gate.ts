@@ -200,6 +200,10 @@ function stripQuotedStrings(command: string): string {
     .replace(/"([^"\\]|\\.)*"/g, '""');
 }
 
+function removeQuoteDelimiters(command: string): string {
+  return command.replace(/["']/g, "");
+}
+
 function removeSafeStderrDevNullRedirects(command: string): string {
   return command.replace(/(^|[\s|;&])2\s*>{1,2}\s*\/dev\/null\b/g, "$1");
 }
@@ -207,13 +211,15 @@ function removeSafeStderrDevNullRedirects(command: string): string {
 function detectDangerousCommand(command: string): MatchResult[] {
   const normalized = removeSafeStderrDevNullRedirects(normalizeCommand(command));
   const commandWithoutQuotedStrings = stripQuotedStrings(normalized);
+  const commandWithoutQuoteDelimiters = removeQuoteDelimiters(normalized);
 
   const matches: MatchResult[] = [];
 
   for (const rule of DANGEROUS_RULES) {
     const match =
       normalized.match(rule.pattern) ??
-      commandWithoutQuotedStrings.match(rule.pattern);
+      commandWithoutQuotedStrings.match(rule.pattern) ??
+      commandWithoutQuoteDelimiters.match(rule.pattern);
 
     if (match) {
       matches.push({
