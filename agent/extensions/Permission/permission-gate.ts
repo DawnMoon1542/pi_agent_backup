@@ -239,13 +239,7 @@ function severityWeight(severity: Severity): number {
 
 function formatMatches(matches: MatchResult[]): string {
   return matches
-    .map((match) => {
-      const matchedText = match.matchedText
-        ? `\n匹配片段: ${match.matchedText}`
-        : "";
-
-      return `[${match.severity}] ${match.id}\n原因: ${match.reason}${matchedText}`;
-    })
+    .map((match) => `[${match.severity}] ${match.id}\n原因: ${match.reason}`)
     .join("\n\n");
 }
 

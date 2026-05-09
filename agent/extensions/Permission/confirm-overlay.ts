@@ -33,21 +33,28 @@ type ConfirmContext = {
   };
 };
 
-function plainVisibleWidth(text: string): number {
+function visibleWidth(text: string): number {
   return [...text.replace(/\x1b\[[0-9;]*m/g, "")].length;
 }
 
-function sliceVisible(text: string, width: number): string {
-  const chars = [...text];
-  if (chars.length <= width) return text;
-  if (width <= 1) return chars.slice(0, Math.max(0, width)).join("");
-  return `${chars.slice(0, width - 1).join("")}…`;
+function takeChars(text: string, width: number): string {
+  return [...text].slice(0, Math.max(0, width)).join("");
+}
+
+function truncate(text: string, width: number): string {
+  if (visibleWidth(text) <= width) return text;
+  if (width <= 1) return takeChars(text, width);
+  return `${takeChars(text, width - 1)}…`;
 }
 
 function padRight(text: string, width: number): string {
-  const visible = plainVisibleWidth(text);
-  if (visible >= width) return text;
-  return `${text}${" ".repeat(width - visible)}`;
+  const size = visibleWidth(text);
+  if (size >= width) return text;
+  return `${text}${" ".repeat(width - size)}`;
+}
+
+function fullWidth(line: string, width: number): string {
+  return padRight(truncate(line, width), width);
 }
 
 function wrapLine(line: string, width: number): string[] {
@@ -57,10 +64,9 @@ function wrapLine(line: string, width: number): string[] {
   const result: string[] = [];
   let remaining = line;
 
-  while (plainVisibleWidth(remaining) > width) {
-    const hardSlice = sliceVisible(remaining, width + 1);
-    const withoutEllipsis = hardSlice.endsWith("…") ? hardSlice.slice(0, -1) : hardSlice;
-    const breakAt = Math.max(withoutEllipsis.lastIndexOf(" "), withoutEllipsis.lastIndexOf("/"), withoutEllipsis.lastIndexOf(","));
+  while (visibleWidth(remaining) > width) {
+    const probe = takeChars(remaining, width);
+    const breakAt = Math.max(probe.lastIndexOf(" "), probe.lastIndexOf("/"), probe.lastIndexOf(","));
     const take = breakAt > Math.floor(width * 0.45) ? breakAt + 1 : width;
     result.push(remaining.slice(0, take).trimEnd());
     remaining = remaining.slice(take).trimStart();
@@ -82,32 +88,12 @@ function isEscape(data: string): boolean {
   return data === "\x1b";
 }
 
-function isTab(data: string): boolean {
-  return data === "\t";
-}
-
-function isLeft(data: string): boolean {
-  return data === "\x1b[D" || data === "h" || data === "H";
-}
-
-function isRight(data: string): boolean {
-  return data === "\x1b[C" || data === "l" || data === "L";
-}
-
 function isUp(data: string): boolean {
   return data === "\x1b[A" || data === "k" || data === "K";
 }
 
 function isDown(data: string): boolean {
   return data === "\x1b[B" || data === "j" || data === "J";
-}
-
-function isPageUp(data: string): boolean {
-  return data === "\x1b[5~";
-}
-
-function isPageDown(data: string): boolean {
-  return data === "\x1b[6~";
 }
 
 function style(theme: ConfirmTheme, name: string, text: string): string {
@@ -126,10 +112,8 @@ export async function confirmOverlay(ctx: ConfirmContext, title: string, message
   return ctx.ui.custom<boolean>(
     (tui, theme, _keybindings, done) => {
       let selected: "no" | "yes" = "no";
-      let scroll = 0;
       let cachedWidth = 0;
       let cachedBodyLines: string[] = [];
-      let cachedViewportHeight = 0;
 
       function rebuildBody(innerWidth: number): string[] {
         if (cachedWidth === innerWidth && cachedBodyLines.length > 0) return cachedBodyLines;
@@ -138,53 +122,46 @@ export async function confirmOverlay(ctx: ConfirmContext, title: string, message
         return cachedBodyLines;
       }
 
-      function button(label: string, value: "no" | "yes"): string {
-        const content = selected === value ? ` ${label} ` : ` ${label} `;
+      function choiceLine(value: "no" | "yes", label: string, hint: string): string {
+        const marker = selected === value ? "●" : "○";
+        const text = `${marker} ${label}  ${hint}`;
         if (selected === value) {
-          return theme.bg ? theme.bg("selectedBg", style(theme, "accent", bold(theme, content))) : `[${label}]`;
+          const highlighted = style(theme, value === "yes" ? "success" : "warning", bold(theme, text));
+          return theme.bg ? theme.bg("selectedBg", highlighted) : highlighted;
         }
-        return style(theme, value === "yes" ? "success" : "warning", content);
-      }
-
-      function clampScroll(totalLines: number): void {
-        const maxScroll = Math.max(0, totalLines - cachedViewportHeight);
-        scroll = Math.max(0, Math.min(scroll, maxScroll));
+        return style(theme, "muted", text);
       }
 
       return {
         render(width: number): string[] {
           const outerWidth = Math.max(4, Math.min(width, 96));
           const innerWidth = Math.max(1, outerWidth - 4);
+          const maxBodyLines = 14;
           const bodyLines = rebuildBody(innerWidth);
-          cachedViewportHeight = Math.min(18, Math.max(6, bodyLines.length));
-          clampScroll(bodyLines.length);
-
+          const visibleBody = bodyLines.slice(0, maxBodyLines);
+          const hiddenCount = Math.max(0, bodyLines.length - visibleBody.length);
           const top = `╭${"─".repeat(outerWidth - 2)}╮`;
           const bottom = `╰${"─".repeat(outerWidth - 2)}╯`;
-          const titleText = sliceVisible(bold(theme, title), innerWidth);
-          const rendered: string[] = [style(theme, "warning", top), `│ ${padRight(style(theme, "warning", titleText), innerWidth)} │`, `│ ${" ".repeat(innerWidth)} │`];
+          const rendered: string[] = [];
 
-          const visibleBody = bodyLines.slice(scroll, scroll + cachedViewportHeight);
+          rendered.push(fullWidth(style(theme, "warning", top), width));
+          rendered.push(fullWidth(`│ ${padRight(style(theme, "warning", truncate(bold(theme, title), innerWidth)), innerWidth)} │`, width));
+          rendered.push(fullWidth(`│ ${" ".repeat(innerWidth)} │`, width));
+
           for (const line of visibleBody) {
-            rendered.push(`│ ${padRight(sliceVisible(line, innerWidth), innerWidth)} │`);
+            rendered.push(fullWidth(`│ ${padRight(truncate(line, innerWidth), innerWidth)} │`, width));
           }
 
-          while (visibleBody.length < cachedViewportHeight) {
-            visibleBody.push("");
-            rendered.push(`│ ${" ".repeat(innerWidth)} │`);
+          if (hiddenCount > 0) {
+            const more = style(theme, "dim", `还有 ${hiddenCount} 行未显示，已隐藏以避免覆盖上下文`);
+            rendered.push(fullWidth(`│ ${padRight(truncate(more, innerWidth), innerWidth)} │`, width));
           }
 
-          if (bodyLines.length > cachedViewportHeight) {
-            const maxScroll = Math.max(0, bodyLines.length - cachedViewportHeight);
-            const scrollInfo = `行 ${scroll + 1}-${Math.min(scroll + cachedViewportHeight, bodyLines.length)}/${bodyLines.length}，↑↓/PgUp/PgDn 查看详情`;
-            rendered.push(`│ ${padRight(style(theme, "dim", sliceVisible(scrollInfo, innerWidth)), innerWidth)} │`);
-            if (scroll > maxScroll) scroll = maxScroll;
-          } else {
-            rendered.push(`│ ${" ".repeat(innerWidth)} │`);
-          }
-
-          rendered.push(`│ ${padRight(`${button("否 Esc/N", "no")}  ${button("是 Enter/Y", "yes")}`, innerWidth)} │`);
-          rendered.push(style(theme, "warning", bottom));
+          rendered.push(fullWidth(`│ ${" ".repeat(innerWidth)} │`, width));
+          rendered.push(fullWidth(`│ ${padRight(choiceLine("no", "否", "Esc / N / Enter"), innerWidth)} │`, width));
+          rendered.push(fullWidth(`│ ${padRight(choiceLine("yes", "是", "Y / Enter"), innerWidth)} │`, width));
+          rendered.push(fullWidth(`│ ${padRight(style(theme, "dim", "↑↓ 切换，Enter 确认"), innerWidth)} │`, width));
+          rendered.push(fullWidth(style(theme, "warning", bottom), width));
           return rendered;
         },
         handleInput(data: string): void {
@@ -200,28 +177,8 @@ export async function confirmOverlay(ctx: ConfirmContext, title: string, message
             done(selected === "yes");
             return;
           }
-          if (isTab(data) || isLeft(data) || isRight(data)) {
+          if (isUp(data) || isDown(data)) {
             selected = selected === "yes" ? "no" : "yes";
-            tui.requestRender?.();
-            return;
-          }
-          if (isUp(data)) {
-            scroll = Math.max(0, scroll - 1);
-            tui.requestRender?.();
-            return;
-          }
-          if (isDown(data)) {
-            scroll += 1;
-            tui.requestRender?.();
-            return;
-          }
-          if (isPageUp(data)) {
-            scroll = Math.max(0, scroll - Math.max(1, cachedViewportHeight - 1));
-            tui.requestRender?.();
-            return;
-          }
-          if (isPageDown(data)) {
-            scroll += Math.max(1, cachedViewportHeight - 1);
             tui.requestRender?.();
           }
         },
