@@ -244,7 +244,7 @@ export default function (pi: ExtensionAPI) {
       const p = pathOf(args as RenderableEditArgs | undefined);
       const displayedPath = state.ranges ? `${p}:${state.ranges}` : p;
       const lines = [`${theme.fg("toolTitle", theme.bold("edit"))} ${theme.fg("accent", displayedPath)}`];
-      if (!state.done) {
+      if (!state.done && context.isPartial) {
         lines.push(...progressLines(args as RenderableEditArgs | undefined, Boolean(context.expanded), theme));
       }
       return component(lines, context.lastComponent);
