@@ -1,7 +1,8 @@
+import { InteractiveMode } from "@mariozechner/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 
-const ABOVE_STATUS_PATCHED = Symbol.for("pi.extensions.permission-confirm.aboveStatusPatched");
-const ABOVE_STATUS_ORIGINAL = Symbol.for("pi.extensions.permission-confirm.originalShowExtensionCustom");
+const ABOVE_STATUS_PATCHED = Symbol.for("pi.extensions.permission-confirm.aboveStatusPatched.v2");
+const ABOVE_STATUS_ORIGINAL = Symbol.for("pi.extensions.permission-confirm.originalShowExtensionCustom.v2");
 
 type ConfirmTheme = {
   fg?: (name: string, text: string) => string;
@@ -34,12 +35,10 @@ type ConfirmContext = {
   };
 };
 
-type PatchableInteractiveMode = {
-  prototype: {
-    showExtensionCustom?: (factory: unknown, options?: { overlay?: boolean; placement?: string }) => Promise<unknown>;
-    [ABOVE_STATUS_PATCHED]?: boolean;
-    [ABOVE_STATUS_ORIGINAL]?: (factory: unknown, options?: { overlay?: boolean; placement?: string }) => Promise<unknown>;
-  };
+type PatchableInteractiveModePrototype = {
+  showExtensionCustom?: (factory: unknown, options?: { overlay?: boolean; placement?: string }) => Promise<unknown>;
+  [ABOVE_STATUS_PATCHED]?: boolean;
+  [ABOVE_STATUS_ORIGINAL]?: (factory: unknown, options?: { overlay?: boolean; placement?: string }) => Promise<unknown>;
 };
 
 type InteractiveModeInstance = {
@@ -58,26 +57,9 @@ type InteractiveModeInstance = {
   createExtensionUIContext?: () => { theme: ConfirmTheme };
 };
 
-function getInteractiveMode(): PatchableInteractiveMode | undefined {
-  try {
-    const req = eval("require") as (name: string) => Record<string, unknown>;
-    const mod = req("@mariozechner/pi-coding-agent") as Record<string, unknown>;
-    return mod.InteractiveMode as PatchableInteractiveMode | undefined;
-  } catch {
-    try {
-      const req = eval("require") as (name: string) => Record<string, unknown>;
-      const mod = req("@earendil-works/pi-coding-agent") as Record<string, unknown>;
-      return mod.InteractiveMode as PatchableInteractiveMode | undefined;
-    } catch {
-      return undefined;
-    }
-  }
-}
-
 function installAboveStatusPlacement(): void {
-  const InteractiveMode = getInteractiveMode();
-  const proto = InteractiveMode?.prototype;
-  if (!proto || proto[ABOVE_STATUS_PATCHED]) return;
+  const proto = InteractiveMode.prototype as PatchableInteractiveModePrototype;
+  if (proto[ABOVE_STATUS_PATCHED]) return;
 
   const original = proto.showExtensionCustom;
   if (typeof original !== "function") return;
