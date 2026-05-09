@@ -1,0 +1,6 @@
+agent/sessions/
+agent/auth.json
+**/.env
+.DS_Store
+node_modules/
+dist/

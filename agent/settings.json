@@ -1,0 +1,16 @@
+{
+  "lastChangelogVersion": "0.74.0",
+  "defaultProvider": "new-api-codex",
+  "defaultModel": "gpt-5.5",
+  "defaultThinkingLevel": "high",
+  "retry": {
+    "enabled": true,
+    "maxRetries": 10,
+    "baseDelayMs": 1000,
+    "provider": {
+      "maxRetries": 10,
+      "maxRetryDelayMs": 300000
+    }
+  },
+  "hideThinkingBlock": true
+}

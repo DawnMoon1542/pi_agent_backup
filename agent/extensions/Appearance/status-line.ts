@@ -1,0 +1,366 @@
+// @name: 状态栏 Widget
+// @category: ui
+// @description: 彩色显示模型、上下文、TPS 和 git 状态
+
+import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+
+type Ctx = Parameters<Parameters<ExtensionAPI["on"]>[1]>[1];
+
+type GitInfo =
+  | { inRepo: false }
+  | {
+      inRepo: true;
+      branch: string;
+      clean: boolean;
+      staged: number;
+      modified: number;
+      untracked: number;
+    };
+
+const RESET = "\x1b[0m";
+const MODEL = "\x1b[38;5;183m";
+const PROGRESS = "\x1b[38;5;111m";
+const LOW = "\x1b[38;5;150m";
+const MID = "\x1b[38;5;223m";
+const HIGH = "\x1b[38;5;211m";
+const TOKEN = "\x1b[38;5;146m";
+const DIR = "\x1b[38;5;150m";
+const GIT = "\x1b[38;5;183m";
+const DIM = "\x1b[2m";
+
+function color(text: string, c: string): string {
+  return `${c}${text}${RESET}`;
+}
+
+function progressColor(percent: number): string {
+  if (percent < 50) return LOW;
+  if (percent < 80) return MID;
+  return HIGH;
+}
+
+function progressBar(percent: number | null | undefined): string {
+  const width = 8; // 原来 10 格的 3/4，四舍五入为 8 格
+  if (percent == null || !Number.isFinite(percent)) return `${"░".repeat(width)} --%`;
+  const p = Math.max(0, Math.min(100, Math.round(percent)));
+  const filled = Math.floor((p / 100) * width);
+  const empty = width - filled;
+  let bar = "█".repeat(filled);
+  if (empty > 0) bar += "▓";
+  if (empty > 1) bar += "▒";
+  if (empty > 2) bar += "░".repeat(empty - 2);
+  return `${bar} ${p}%`;
+}
+
+function shortDir(cwd: string): string {
+  const home = process.env.HOME;
+  const normalized = cwd.replace(/\\/g, "/");
+  const display = home && normalized.startsWith(home) ? `~${normalized.slice(home.length)}` : normalized;
+  const parts = display.split("/").filter(Boolean);
+  if (display.startsWith("~/") && parts.length >= 2) return `~/${parts.slice(-2).join("/")}`;
+  if (parts.length >= 2) return parts.slice(-2).join("/");
+  return display || ".";
+}
+
+function tokenCount(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return "0k";
+  if (n >= 1_000_000) {
+    return `${(n / 1_000_000).toFixed(3).replace(/\.0+$/, "").replace(/(\.\d*?)0+$/, "$1")}m`;
+  }
+  return `${Math.round(n / 1000)}k`;
+}
+
+function sumUsage(ctx: Ctx): { input: number; output: number; cost: number } {
+  let input = 0;
+  let output = 0;
+  let cost = 0;
+  for (const entry of ctx.sessionManager.getBranch()) {
+    if (entry.type !== "message") continue;
+    const msg = entry.message as any;
+    if (msg?.role !== "assistant" || !msg.usage) continue;
+    // 与 pi 官方 footer 保持一致：Input 只累计 usage.input。
+    // 不把 cacheRead/cacheWrite 加进去，否则开启 prompt cache 后会把每轮缓存命中也重复累计，数值会明显偏大。
+    input += Number(msg.usage.input ?? 0);
+    output += Number(msg.usage.output ?? 0);
+    cost += Number(msg.usage.cost?.total ?? 0);
+  }
+  return { input, output, cost };
+}
+
+function formatCost(cost: number): string {
+  if (!Number.isFinite(cost) || cost <= 0) return "$0.000";
+  if (cost < 0.01) return `$${cost.toFixed(4)}`;
+  if (cost < 1) return `$${cost.toFixed(3)}`;
+  return `$${cost.toFixed(2)}`;
+}
+
+function estimateTokens(text: string): number {
+  // Live TPS can only be estimated until provider returns usage.output.
+  // Use a conservative char/token heuristic; final TPS is recalculated from actual output tokens.
+  return Math.max(0, text.length / 4);
+}
+
+function formatTps(tps: number | undefined): string {
+  if (tps == null || !Number.isFinite(tps)) return "--";
+  return tps < 10 ? tps.toFixed(1) : Math.round(tps).toString();
+}
+
+function visibleWidth(s: string): number {
+  return s.replace(/\x1b\[[0-9;]*m/g, "").length;
+}
+
+function truncateAnsi(s: string, width: number): string {
+  if (width <= 0 || visibleWidth(s) <= width) return s;
+  let out = "";
+  let visible = 0;
+  for (let i = 0; i < s.length && visible < width - 1; i++) {
+    if (s[i] === "\x1b") {
+      const match = s.slice(i).match(/^\x1b\[[0-9;]*m/);
+      if (match) {
+        out += match[0];
+        i += match[0].length - 1;
+        continue;
+      }
+    }
+    out += s[i];
+    visible++;
+  }
+  return `${out}…${RESET}`;
+}
+
+export default function (pi: ExtensionAPI) {
+  let gitInfo: GitInfo = { inRepo: false };
+  let gitRefreshInFlight = false;
+  let turnCount = 0;
+  let lastTps: number | undefined;
+  let streamStartMs: number | undefined;
+  let liveOutputTokens = 0;
+  let lastRenderMs = 0;
+  let deferredRender: ReturnType<typeof setTimeout> | undefined;
+  let latestFooterLines = [color("status loading...", DIM)];
+  let requestFooterRender: (() => void) | undefined;
+  let currentCtx: Ctx | undefined;
+  let statusVisible = true;
+
+  function setWhichKeyWidget(ctx: Ctx): void {
+    const key = (s: string) => color(s, DIM);
+    ctx.ui.setWidget("status-line-which-key", [
+      `${key("Ctrl+L")} model  ${key("Ctrl+T")} thinking  ${key("Ctrl+G")} editor  ${key("Shift+Enter")} newline  ${key("Ctrl+V")} paste image`,
+    ], { placement: "aboveEditor" });
+  }
+
+  function installFooter(ctx: Ctx): void {
+    currentCtx = ctx;
+    if (!statusVisible) {
+      ctx.ui.setFooter(undefined);
+      ctx.ui.setWidget("status-line-which-key", undefined);
+      return;
+    }
+    ctx.ui.setFooter((tui) => {
+      requestFooterRender = () => tui.requestRender();
+      return {
+        dispose() {
+          requestFooterRender = undefined;
+        },
+        invalidate() {},
+        render(width: number): string[] {
+          return latestFooterLines.map((line) => truncateAnsi(line, width));
+        },
+      };
+    });
+    ctx.ui.setStatus("status-widget", undefined);
+    ctx.ui.setWidget("status-widget", undefined);
+    setWhichKeyWidget(ctx);
+  }
+
+  async function refreshGit(ctx: Ctx): Promise<void> {
+    if (gitRefreshInFlight) return;
+    gitRefreshInFlight = true;
+    try {
+      const res = await pi.exec("git", ["status", "--porcelain=v1", "-b"], { cwd: ctx.cwd, timeout: 1500 });
+      if (res.code !== 0) {
+        gitInfo = { inRepo: false };
+        return;
+      }
+
+      const lines = res.stdout.trimEnd().split("\n").filter(Boolean);
+      const branchLine = lines[0] ?? "";
+      const branch = branchLine
+        .replace(/^##\s+/, "")
+        .replace(/\.\.\..*$/, "")
+        .replace(/\s+\[.*\]$/, "")
+        .trim() || "HEAD";
+
+      let staged = 0;
+      let modified = 0;
+      let untracked = 0;
+      for (const line of lines.slice(1)) {
+        if (line.startsWith("??")) {
+          untracked++;
+          continue;
+        }
+        const x = line[0];
+        const y = line[1];
+        if (x && x !== " " && x !== "?") staged++;
+        if (y && y !== " " && y !== "?") modified++;
+      }
+      gitInfo = { inRepo: true, branch, clean: staged + modified + untracked === 0, staged, modified, untracked };
+    } catch {
+      gitInfo = { inRepo: false };
+    } finally {
+      gitRefreshInFlight = false;
+    }
+  }
+
+  function gitSegment(): string {
+    if (!gitInfo.inRepo) return "";
+    const base = `${color(`(${gitInfo.branch})`, GIT)} ${gitInfo.clean ? color("✓", LOW) : color("✗", HIGH)}`;
+    if (gitInfo.clean) return base;
+    const parts: string[] = [];
+    if (gitInfo.staged > 0) parts.push(color(`${gitInfo.staged} new`, LOW));
+    if (gitInfo.modified > 0) parts.push(color(`${gitInfo.modified} modified`, MID));
+    if (gitInfo.untracked > 0) parts.push(color(`${gitInfo.untracked} untracked`, TOKEN));
+    return `${base} ${parts.join(" ")}`;
+  }
+
+  function render(ctx: Ctx, force = false): void {
+    const now = Date.now();
+    if (!force && now - lastRenderMs < 250) {
+      if (!deferredRender) {
+        deferredRender = setTimeout(() => {
+          deferredRender = undefined;
+          render(ctx, true);
+        }, 250 - (now - lastRenderMs));
+      }
+      return;
+    }
+    lastRenderMs = now;
+
+    const modelName = ctx.model ? (ctx.model.name || ctx.model.id) : "Model";
+    const usage = ctx.getContextUsage();
+    const totals = sumUsage(ctx);
+    const tpsText = formatTps(lastTps);
+
+    const line1 = [
+      color(`[${modelName}]`, MODEL),
+      color(progressBar(usage?.percent), PROGRESS),
+      color(`| Ctx: ${usage?.tokens == null ? "--" : tokenCount(usage.tokens)}/${usage?.contextWindow ? tokenCount(usage.contextWindow) : "--"}  Input ${tokenCount(totals.input)}  Output ${tokenCount(totals.output)}`, TOKEN),
+      color(`| Cost: ${formatCost(totals.cost)}`, TOKEN),
+    ].join(" ");
+
+    const git = gitSegment();
+    const line2 = [
+      color(shortDir(ctx.cwd), DIR),
+      color(`TPS: ${tpsText}`, MID),
+      git,
+    ].filter(Boolean).join(" ");
+
+    latestFooterLines = [line1, line2];
+
+    if (statusVisible) requestFooterRender?.();
+  }
+
+  function resetStream(): void {
+    streamStartMs = undefined;
+    liveOutputTokens = 0;
+  }
+
+  const offStatusVisible = pi.events.on("status-line:visible", (value) => {
+    statusVisible = value !== false;
+    if (!currentCtx) return;
+    if (statusVisible) {
+      installFooter(currentCtx);
+      render(currentCtx, true);
+    } else {
+      currentCtx.ui.setFooter(undefined);
+      currentCtx.ui.setWidget("status-line-which-key", undefined);
+      currentCtx.ui.setStatus("status-widget", undefined);
+    }
+  });
+
+  pi.on("session_start", async (_event, ctx) => {
+    installFooter(ctx);
+    await refreshGit(ctx);
+    render(ctx, true);
+  });
+
+  pi.on("model_select", async (_event, ctx) => render(ctx, true));
+
+  pi.on("turn_start", async (_event, ctx) => {
+    turnCount++;
+    await refreshGit(ctx);
+    render(ctx, true);
+  });
+
+  pi.on("message_start", async (event, ctx) => {
+    const msg = event.message as any;
+    if (msg?.role !== "assistant") return;
+    streamStartMs = Date.now();
+    liveOutputTokens = 0;
+    lastTps = undefined;
+    render(ctx, true);
+  });
+
+  pi.on("message_update", async (event, ctx) => {
+    const e = event.assistantMessageEvent;
+    if (e.type === "start") {
+      streamStartMs = Date.now();
+      liveOutputTokens = 0;
+      lastTps = undefined;
+    } else if (e.type === "text_delta" || e.type === "thinking_delta" || e.type === "toolcall_delta") {
+      if (!streamStartMs) streamStartMs = Date.now();
+      liveOutputTokens += estimateTokens(e.delta);
+      const seconds = Math.max((Date.now() - streamStartMs) / 1000, 0.001);
+      lastTps = liveOutputTokens / seconds;
+    } else if (e.type === "done" || e.type === "error") {
+      if (!streamStartMs) streamStartMs = Date.now();
+      const msg = e.type === "done" ? e.message : e.error;
+      const actualOutputTokens = Number(msg.usage?.output ?? 0);
+      if (actualOutputTokens > 0) {
+        const seconds = Math.max((Date.now() - streamStartMs) / 1000, 0.001);
+        // 只用本次响应的实际 output tokens / 本次响应耗时，避免累计 output 跨调用相减导致 TPS 错误。
+        lastTps = actualOutputTokens / seconds;
+        resetStream();
+      }
+      // 有些 provider 的 usage 要到 message_end 才稳定；此时不要 resetStream，留给 message_end 计算。
+    }
+    render(ctx);
+  });
+
+  pi.on("message_end", async (event, ctx) => {
+    const msg = event.message as any;
+    if (msg?.role === "assistant") {
+      const actualOutputTokens = Number(msg.usage?.output ?? 0);
+      if (!streamStartMs && typeof msg.timestamp === "number") {
+        streamStartMs = Math.min(msg.timestamp, Date.now());
+      }
+      if (streamStartMs && actualOutputTokens > 0) {
+        const seconds = Math.max((Date.now() - streamStartMs) / 1000, 0.001);
+        lastTps = actualOutputTokens / seconds;
+      } else if (liveOutputTokens > 0 && streamStartMs) {
+        const seconds = Math.max((Date.now() - streamStartMs) / 1000, 0.001);
+        lastTps = liveOutputTokens / seconds;
+      }
+      resetStream();
+    }
+    render(ctx, true);
+  });
+
+  pi.on("tool_execution_end", async (_event, ctx) => {
+    await refreshGit(ctx);
+    render(ctx, true);
+  });
+
+  pi.on("agent_end", async (_event, ctx) => {
+    await refreshGit(ctx);
+    render(ctx, true);
+  });
+
+  pi.on("session_shutdown", async (_event, ctx) => {
+    if (deferredRender) clearTimeout(deferredRender);
+    offStatusVisible();
+    ctx.ui.setFooter(undefined);
+    ctx.ui.setStatus("status-widget", undefined);
+    ctx.ui.setWidget("status-widget", undefined);
+    ctx.ui.setWidget("status-line-which-key", undefined);
+  });
+}
