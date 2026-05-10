@@ -1,6 +1,7 @@
 agent/sessions/
 agent/auth.json
 **/.env
+**/linter_log/
 .DS_Store
 node_modules/
 dist/

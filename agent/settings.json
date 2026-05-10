@@ -1,6 +1,6 @@
 {
   "lastChangelogVersion": "0.74.0",
-  "defaultProvider": "new-api-codex",
+  "defaultProvider": "openai-codex",
   "defaultModel": "gpt-5.5",
   "defaultThinkingLevel": "high",
   "retry": {
@@ -12,5 +12,18 @@
       "maxRetryDelayMs": 300000
     }
   },
-  "hideThinkingBlock": true
+  "hideThinkingBlock": true,
+  "enabledModels": [
+    "openai-codex/gpt-5.5",
+    "openai-codex/gpt-5.4",
+    "new-api-claude/claude-opus-4-6",
+    "personal-mimo/mimo-v2.5-pro",
+    "personal-dpsk/deepseek-v4-flash",
+    "personal-dpsk/deepseek-v4-pro",
+    "new-api-openai/gemini-3.1-pro-preview",
+    "new-api-codex/gpt-5.5",
+    "new-api-claude/deepseek-v4-flash",
+    "new-api-claude/deepseek-v4-pro",
+    "new-api-claude/claude-sonnet-4-6"
+  ]
 }

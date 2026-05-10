@@ -13,7 +13,7 @@ export default async function (pi: ExtensionAPI) {
         reasoning: true,
         input: ["text", "image"],
         cost: { input: 5.0, output: 30.0, cacheRead: 0.5, cacheWrite: 5.0 },
-        contextWindow: 1_050_000,
+        contextWindow: 272_000,
         maxTokens: 128_000,
       },
     ],

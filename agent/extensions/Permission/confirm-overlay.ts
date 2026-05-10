@@ -134,17 +134,10 @@ function bold(theme: ConfirmTheme, text: string): string {
 
 function visibleMessageLines(message: string, width: number): string[] {
   const bodyWidth = Math.max(20, width - 4);
-  const wrapped = message
+  return message
     .replace(/\r/g, "")
     .split("\n")
     .flatMap((line) => wrapTextWithAnsi(line, bodyWidth));
-
-  const maxLines = 12;
-  if (wrapped.length <= maxLines) return wrapped;
-  return [
-    ...wrapped.slice(0, maxLines),
-    truncateToWidth(`还有 ${wrapped.length - maxLines} 行未显示`, bodyWidth),
-  ];
 }
 
 function optionLine(theme: ConfirmTheme, selected: "no" | "yes", value: "no" | "yes", width: number): string {
