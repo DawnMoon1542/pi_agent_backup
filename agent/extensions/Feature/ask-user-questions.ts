@@ -486,7 +486,7 @@ export default function askUserQuestions(pi: ExtensionAPI) {
       "AskUserQuestions option ids should be stable and descriptive because selected options return ids rather than visible labels.",
     ],
     parameters: AskUserQuestionsParameters,
-    async execute(_toolCallId, params: AskUserQuestionsParams, _signal, _onUpdate, ctx) {
+    async execute(toolCallId, params: AskUserQuestionsParams, _signal, _onUpdate, ctx) {
       if (!ctx.hasUI) {
         return {
           content: [{ type: "text", text: "AskUserQuestions failed: interactive UI is not available." }],
@@ -502,9 +502,16 @@ export default function askUserQuestions(pi: ExtensionAPI) {
         };
       }
 
-      const result = await customAboveStatus<AskUserQuestionsResult>(ctx, (tui, theme, _keybindings, done) =>
-        new AskUserQuestionsDialog(params, tui, theme, done)
-      );
+      const pauseReason = `AskUserQuestions:${toolCallId}`;
+      pi.events.emit("status-line:timer-pause", pauseReason);
+      let result: AskUserQuestionsResult;
+      try {
+        result = await customAboveStatus<AskUserQuestionsResult>(ctx, (tui, theme, _keybindings, done) =>
+          new AskUserQuestionsDialog(params, tui, theme, done)
+        );
+      } finally {
+        pi.events.emit("status-line:timer-resume", pauseReason);
+      }
 
       return {
         content: [{ type: "text", text: resultText(result) }],

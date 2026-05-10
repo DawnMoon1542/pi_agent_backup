@@ -20,6 +20,14 @@ type GitInfo =
       untracked: number;
     };
 
+type TimerSnapshot = {
+  version: 1;
+  completedWorkMs: number;
+  lastTurnWorkMs: number;
+  updatedAt: number;
+};
+
+const TIMER_CUSTOM_TYPE = "status-line-work-timer";
 const SETTINGS_PATH = join(homedir(), ".pi", "agent", "settings.json");
 
 const RESET = "\x1b[0m";
@@ -47,7 +55,7 @@ function color(text: string, c: string): string {
 
 function shortcutPill(keyText: string, label: string, active: boolean): string {
   const bg = active ? PILL_ACTIVE_BG : PILL_INACTIVE_BG;
-  return `${bg} ${DIM}${keyText}${DIM_OFF} ${label} ${RESET}`;
+  return `${bg}${DIM}${keyText}${DIM_OFF} ${label}${active ? " " : ""}${RESET}`;
 }
 
 function readThinkingHidden(): boolean {
@@ -228,10 +236,90 @@ export default function (pi: ExtensionAPI) {
   let toolsExpanded = false;
   let thinkingHidden = readThinkingHidden();
   let offShortcutStateInput: (() => void) | undefined;
+  let timerRefresh: ReturnType<typeof setInterval> | undefined;
+  let activeWork = false;
+  let activeWorkSegmentStartMs: number | undefined;
+  let activeWorkAccumulatedMs = 0;
+  let completedWorkMs = 0;
+  let lastTurnWorkMs = 0;
+  const timerPauseReasons = new Set<string>();
 
   function syncShortcutStates(ctx: Ctx): void {
     toolsExpanded = ctx.ui.getToolsExpanded();
     thinkingHidden = readThinkingHidden();
+  }
+
+  function formatDuration(ms: number): string {
+    const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    const parts: string[] = [];
+    if (hours > 0) parts.push(`${hours}h`);
+    if (hours > 0 || minutes > 0) parts.push(`${minutes}m`);
+    parts.push(`${seconds}s`);
+    return parts.join(" ");
+  }
+
+  function safeMs(value: unknown): number {
+    return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
+  }
+
+  function readTimerSnapshot(entry: unknown): TimerSnapshot | undefined {
+    const item = entry as { type?: unknown; customType?: unknown; data?: unknown };
+    if (item.type !== "custom" || item.customType !== TIMER_CUSTOM_TYPE) return undefined;
+    const data = item.data as Partial<TimerSnapshot> | undefined;
+    if (!data || data.version !== 1) return undefined;
+    return {
+      version: 1,
+      completedWorkMs: safeMs(data.completedWorkMs),
+      lastTurnWorkMs: safeMs(data.lastTurnWorkMs),
+      updatedAt: safeMs(data.updatedAt),
+    };
+  }
+
+  function restoreTimerSnapshot(ctx: Ctx): void {
+    activeWork = false;
+    activeWorkSegmentStartMs = undefined;
+    activeWorkAccumulatedMs = 0;
+    timerPauseReasons.clear();
+    stopTimerRefresh();
+    completedWorkMs = 0;
+    lastTurnWorkMs = 0;
+
+    for (const entry of ctx.sessionManager.getBranch()) {
+      const snapshot = readTimerSnapshot(entry);
+      if (!snapshot) continue;
+      completedWorkMs = snapshot.completedWorkMs;
+      lastTurnWorkMs = snapshot.lastTurnWorkMs;
+    }
+  }
+
+  function persistTimerSnapshot(): void {
+    pi.appendEntry(TIMER_CUSTOM_TYPE, {
+      version: 1,
+      completedWorkMs,
+      lastTurnWorkMs,
+      updatedAt: Date.now(),
+    } satisfies TimerSnapshot);
+  }
+
+  function currentTurnWorkMs(now = Date.now()): number {
+    if (!activeWork) return lastTurnWorkMs;
+    const runningSegmentMs = activeWorkSegmentStartMs === undefined ? 0 : now - activeWorkSegmentStartMs;
+    return Math.max(0, activeWorkAccumulatedMs + runningSegmentMs);
+  }
+
+  function timerStateLine(): string {
+    const current = currentTurnWorkMs();
+    const total = completedWorkMs + (activeWork ? current : 0);
+    return [
+      color("Worked for ", DIM),
+      formatDuration(current),
+      color(", total ", DIM),
+      formatDuration(total),
+      color(" in this session", DIM),
+    ].join("");
   }
 
   function shortcutStateLine(): string {
@@ -243,7 +331,7 @@ export default function (pi: ExtensionAPI) {
 
   function setWhichKeyWidget(ctx: Ctx, options: { sync?: boolean } = {}): void {
     if (options.sync !== false) syncShortcutStates(ctx);
-    ctx.ui.setWidget("status-line-which-key", [shortcutStateLine()], { placement: "aboveEditor" });
+    ctx.ui.setWidget("status-line-which-key", [timerStateLine(), shortcutStateLine()], { placement: "aboveEditor" });
   }
 
   function refreshShortcutStateDisplay(ctx: Ctx, options: { sync?: boolean } = {}): void {
@@ -264,6 +352,73 @@ export default function (pi: ExtensionAPI) {
     offShortcutStateInput = () => {
       listeners.delete(listener);
     };
+  }
+
+  function refreshTimerDisplay(): void {
+    if (!currentCtx || !statusVisible) return;
+    setWhichKeyWidget(currentCtx, { sync: false });
+  }
+
+  function startTimerRefresh(): void {
+    if (timerRefresh) return;
+    timerRefresh = setInterval(refreshTimerDisplay, 1000);
+  }
+
+  function stopTimerRefresh(): void {
+    if (!timerRefresh) return;
+    clearInterval(timerRefresh);
+    timerRefresh = undefined;
+  }
+
+  function startWorkTimer(): void {
+    activeWork = true;
+    activeWorkAccumulatedMs = 0;
+    lastTurnWorkMs = 0;
+    activeWorkSegmentStartMs = timerPauseReasons.size === 0 ? Date.now() : undefined;
+    startTimerRefresh();
+    refreshTimerDisplay();
+  }
+
+  function pauseWorkTimer(reason: unknown): void {
+    const key = typeof reason === "string" && reason.trim() ? reason : "external";
+    const wasRunning = timerPauseReasons.size === 0;
+    timerPauseReasons.add(key);
+    if (!activeWork || !wasRunning) {
+      refreshTimerDisplay();
+      return;
+    }
+    if (activeWorkSegmentStartMs !== undefined) {
+      activeWorkAccumulatedMs += Math.max(0, Date.now() - activeWorkSegmentStartMs);
+      activeWorkSegmentStartMs = undefined;
+    }
+    refreshTimerDisplay();
+  }
+
+  function resumeWorkTimer(reason: unknown): void {
+    const key = typeof reason === "string" && reason.trim() ? reason : "external";
+    timerPauseReasons.delete(key);
+    if (!activeWork) {
+      refreshTimerDisplay();
+      return;
+    }
+    if (timerPauseReasons.size === 0 && activeWorkSegmentStartMs === undefined) {
+      activeWorkSegmentStartMs = Date.now();
+    }
+    refreshTimerDisplay();
+  }
+
+  function finishWorkTimer(): boolean {
+    if (!activeWork) return false;
+    const elapsed = currentTurnWorkMs();
+    lastTurnWorkMs = elapsed;
+    completedWorkMs += elapsed;
+    activeWork = false;
+    activeWorkSegmentStartMs = undefined;
+    activeWorkAccumulatedMs = 0;
+    timerPauseReasons.clear();
+    stopTimerRefresh();
+    refreshTimerDisplay();
+    return true;
   }
 
   function installFooter(ctx: Ctx): void {
@@ -396,13 +551,35 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
+  const offTimerPause = pi.events.on("status-line:timer-pause", (reason) => {
+    pauseWorkTimer(reason);
+  });
+
+  const offTimerResume = pi.events.on("status-line:timer-resume", (reason) => {
+    resumeWorkTimer(reason);
+  });
+
   pi.on("session_start", async (_event, ctx) => {
+    restoreTimerSnapshot(ctx);
     installFooter(ctx);
     await refreshGit(ctx);
     render(ctx, true);
   });
 
+  pi.on("session_tree", async (_event, ctx) => {
+    restoreTimerSnapshot(ctx);
+    currentCtx = ctx;
+    refreshTimerDisplay();
+    await refreshGit(ctx);
+    render(ctx, true);
+  });
+
   pi.on("model_select", async (_event, ctx) => render(ctx, true));
+
+  pi.on("agent_start", async (_event, ctx) => {
+    currentCtx = ctx;
+    startWorkTimer();
+  });
 
   pi.on("turn_start", async (_event, ctx) => {
     turnCount++;
@@ -470,13 +647,19 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("agent_end", async (_event, ctx) => {
+    if (finishWorkTimer()) {
+      persistTimerSnapshot();
+    }
     await refreshGit(ctx);
     render(ctx, true);
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
     if (deferredRender) clearTimeout(deferredRender);
+    stopTimerRefresh();
     offStatusVisible();
+    offTimerPause();
+    offTimerResume();
     offShortcutStateInput?.();
     offShortcutStateInput = undefined;
     ctx.ui.setFooter(undefined);

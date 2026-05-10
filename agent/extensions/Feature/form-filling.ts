@@ -599,7 +599,7 @@ export default function formFilling(pi: ExtensionAPI) {
       "Use FormFilling type=input for fill-in fields and type=text for read-only explanatory text inside the form.",
     ],
     parameters: FormFillingParameters,
-    async execute(_toolCallId, params: FormFillingParams, _signal, _onUpdate, ctx) {
+    async execute(toolCallId, params: FormFillingParams, _signal, _onUpdate, ctx) {
       if (!ctx.hasUI) {
         return {
           content: [{ type: "text", text: "FormFilling failed: interactive UI is not available." }],
@@ -615,9 +615,16 @@ export default function formFilling(pi: ExtensionAPI) {
         };
       }
 
-      const result = await customAboveStatus<FormFillingResult>(ctx, (tui, theme, _keybindings, done) =>
-        new FormFillingDialog(params, tui, theme, done)
-      );
+      const pauseReason = `FormFilling:${toolCallId}`;
+      pi.events.emit("status-line:timer-pause", pauseReason);
+      let result: FormFillingResult;
+      try {
+        result = await customAboveStatus<FormFillingResult>(ctx, (tui, theme, _keybindings, done) =>
+          new FormFillingDialog(params, tui, theme, done)
+        );
+      } finally {
+        pi.events.emit("status-line:timer-resume", pauseReason);
+      }
 
       return {
         content: [{ type: "text", text: resultText(result) }],

@@ -258,19 +258,26 @@ export default function (pi: ExtensionAPI) {
 
     if (matches.length === 0) return;
 
-    const ok = await confirmOverlay(
-      ctx,
-      "危险命令检测",
-      [
-        "高危 Bash 操作:",
-        formatMatches(matches),
-        "",
-        "完整命令:",
-        command,
-        "",
-        "是否执行?",
-      ].join("\n")
-    );
+    const pauseReason = `permission-gate:${event.toolCallId}`;
+    pi.events.emit("status-line:timer-pause", pauseReason);
+    let ok = false;
+    try {
+      ok = await confirmOverlay(
+        ctx,
+        "危险命令检测",
+        [
+          "高危 Bash 操作:",
+          formatMatches(matches),
+          "",
+          "完整命令:",
+          command,
+          "",
+          "是否执行?",
+        ].join("\n")
+      );
+    } finally {
+      pi.events.emit("status-line:timer-resume", pauseReason);
+    }
 
     if (!ok) {
       return {

@@ -134,7 +134,14 @@ export default function (pi: ExtensionAPI) {
     const matches = detectSensitivePath(path);
     if (matches.length === 0) return;
 
-    const ok = await confirmSensitiveFile(ctx, operation, path, matches);
+    const pauseReason = `sensitive-file-gate:${event.toolCallId}`;
+    pi.events.emit("status-line:timer-pause", pauseReason);
+    let ok = false;
+    try {
+      ok = await confirmSensitiveFile(ctx, operation, path, matches);
+    } finally {
+      pi.events.emit("status-line:timer-resume", pauseReason);
+    }
     if (!ok) {
       return {
         block: true,
