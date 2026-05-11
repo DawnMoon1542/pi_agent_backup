@@ -532,12 +532,16 @@ export default function (pi: ExtensionAPI) {
     if (currentMessageTimestamp === undefined) return;
     const durationMs = durationMap().get(currentMessageTimestamp) ?? currentThinkingDuration();
     if (durationMs <= 0 && !currentThinkingText.trim()) return;
-    pi.appendEntry(THINKING_DURATION_CUSTOM_TYPE, {
-      version: 1,
-      messageTimestamp: currentMessageTimestamp,
-      durationMs,
-      updatedAt: Date.now(),
-    } satisfies ThinkingDurationSnapshot);
+    try {
+      pi.appendEntry(THINKING_DURATION_CUSTOM_TYPE, {
+        version: 1,
+        messageTimestamp: currentMessageTimestamp,
+        durationMs,
+        updatedAt: Date.now(),
+      } satisfies ThinkingDurationSnapshot);
+    } catch {
+      // Runtime may be stale after session replacement/shutdown
+    }
   }
 
   function extractThinkingText(message: any): string {
@@ -639,6 +643,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
+    currentCtx = undefined;
     finishThinkingSegment();
     persistThinkingDuration();
     stopRefreshTimer();

@@ -296,12 +296,16 @@ export default function (pi: ExtensionAPI) {
   }
 
   function persistTimerSnapshot(): void {
-    pi.appendEntry(TIMER_CUSTOM_TYPE, {
-      version: 1,
-      completedWorkMs,
-      lastTurnWorkMs,
-      updatedAt: Date.now(),
-    } satisfies TimerSnapshot);
+    try {
+      pi.appendEntry(TIMER_CUSTOM_TYPE, {
+        version: 1,
+        completedWorkMs,
+        lastTurnWorkMs,
+        updatedAt: Date.now(),
+      } satisfies TimerSnapshot);
+    } catch {
+      // Runtime may be stale after session replacement/shutdown
+    }
   }
 
   function currentTurnWorkMs(now = Date.now()): number {
@@ -655,7 +659,9 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
+    currentCtx = undefined;
     if (deferredRender) clearTimeout(deferredRender);
+    deferredRender = undefined;
     stopTimerRefresh();
     offStatusVisible();
     offTimerPause();

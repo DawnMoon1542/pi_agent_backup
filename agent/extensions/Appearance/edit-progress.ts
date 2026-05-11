@@ -2,8 +2,8 @@
 // @category: ui
 // @description: edit 工具调用时显示最近三行更新进度，完成后显示紧凑更新内容
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { createEditTool } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createEditTool } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, type Component } from "@earendil-works/pi-tui";
 
 const PREVIEW_LINES = 3;
