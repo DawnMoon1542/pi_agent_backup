@@ -2,8 +2,7 @@
 // @category: ui
 // @description: 通过扩展屏蔽 Ctrl+T 产生的 Thinking blocks 状态行，只保留 hidden thinking label
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { InteractiveMode } from "@mariozechner/pi-coding-agent";
+import { InteractiveMode, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const PATCHED = Symbol.for("pi.extensions.suppress-thinking-status.patched");
 const ORIGINAL_SHOW_STATUS = Symbol.for("pi.extensions.suppress-thinking-status.originalShowStatus");
