@@ -133,7 +133,6 @@ export default function (pi: ExtensionAPI) {
             previewLines: PREVIEW_LINES,
           },
         ],
-        footer: expandFooter(theme),
         expanded: Boolean(context.expanded),
       });
       return component;

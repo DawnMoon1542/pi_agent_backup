@@ -1,6 +1,6 @@
 {
   "lastChangelogVersion": "0.74.0",
-  "defaultProvider": "openai-codex",
+  "defaultProvider": "new-api-codex",
   "defaultModel": "gpt-5.5",
   "defaultThinkingLevel": "high",
   "retry": {
