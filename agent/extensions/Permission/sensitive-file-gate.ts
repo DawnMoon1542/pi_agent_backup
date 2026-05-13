@@ -6,6 +6,8 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { isToolCallEventType } from "@mariozechner/pi-coding-agent";
 import { confirmOverlay } from "./confirm-overlay";
 
+const YOLO_ACTIVE = Symbol.for("pi.extensions.yolo.active");
+
 type Operation = "read" | "write" | "edit";
 
 type SensitiveRule = {
@@ -130,6 +132,8 @@ export default function (pi: ExtensionAPI) {
     }
 
     if (!operation || !path) return;
+
+    if ((globalThis as any)[YOLO_ACTIVE]) return;
 
     const matches = detectSensitivePath(path);
     if (matches.length === 0) return;

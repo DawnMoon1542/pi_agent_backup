@@ -44,6 +44,7 @@ const DIM_OFF = "\x1b[22m";
 const PILL_ACTIVE_BG = "\x1b[48;5;238m";
 const PILL_INACTIVE_BG = "";
 
+const YOLO_ACTIVE = Symbol.for("pi.extensions.yolo.active");
 const SHORTCUT_PATCHED = Symbol.for("pi.extensions.status-line.shortcutState.patched");
 const SHORTCUT_ORIGINAL_SET_TOOLS = Symbol.for("pi.extensions.status-line.shortcutState.originalSetToolsExpanded");
 const SHORTCUT_ORIGINAL_TOGGLE_THINKING = Symbol.for("pi.extensions.status-line.shortcutState.originalToggleThinking");
@@ -55,7 +56,7 @@ function color(text: string, c: string): string {
 
 function shortcutPill(keyText: string, label: string, active: boolean): string {
   const bg = active ? PILL_ACTIVE_BG : PILL_INACTIVE_BG;
-  return `${bg}${DIM}${keyText}${DIM_OFF} ${label}${active ? " " : ""}${RESET}`;
+  return `${bg}${DIM}${keyText}${DIM_OFF} ${label}${RESET}`;
 }
 
 function readThinkingHidden(): boolean {
@@ -221,6 +222,16 @@ function truncateAnsi(s: string, width: number): string {
 export default function (pi: ExtensionAPI) {
   patchShortcutStateHooks();
 
+  pi.registerShortcut("ctrl+y", {
+    description: "Toggle yolo mode (bypass permission gates)",
+    handler: async (ctx) => {
+      yoloActive = !yoloActive;
+      (globalThis as any)[YOLO_ACTIVE] = yoloActive;
+      pi.events.emit("yolo:state", yoloActive);
+      refreshShortcutStateDisplay(ctx, { sync: false });
+    },
+  });
+
   let gitInfo: GitInfo = { inRepo: false };
   let gitRefreshInFlight = false;
   let turnCount = 0;
@@ -235,6 +246,7 @@ export default function (pi: ExtensionAPI) {
   let statusVisible = true;
   let toolsExpanded = false;
   let thinkingHidden = readThinkingHidden();
+  let yoloActive = Boolean((globalThis as any)[YOLO_ACTIVE]);
   let offShortcutStateInput: (() => void) | undefined;
   let timerRefresh: ReturnType<typeof setInterval> | undefined;
   let activeWork = false;
@@ -326,16 +338,22 @@ export default function (pi: ExtensionAPI) {
     ].join("");
   }
 
-  function shortcutStateLine(): string {
+  function shortcutLine1(): string {
     const tools = shortcutPill("Ctrl+O", "tools", toolsExpanded);
     const thinking = shortcutPill("Ctrl+T", "thinking", !thinkingHidden);
+    const yolo = shortcutPill("Ctrl+Y", "yolo", yoloActive);
     const key = (s: string) => color(s, DIM);
-    return `${tools} ${thinking}  ${key("Ctrl+L")} model  ${key("Ctrl+G")} editor  ${key("Ctrl+V")} paste image`;
+    return `${tools}  ${thinking}  ${yolo}  ${key("Ctrl+L")} model     ${key("Ctrl+G")} editor`;
+  }
+
+  function shortcutLine2(): string {
+    const key = (s: string) => color(s, DIM);
+    return `${key("Ctrl+V")} image  ${key("Ctrl+A")} bol       ${key("Ctrl+E")} eol   ${key("Ctrl+U")} kill-bol  ${key("Ctrl+K")} kill-eol`;
   }
 
   function setWhichKeyWidget(ctx: Ctx, options: { sync?: boolean } = {}): void {
     if (options.sync !== false) syncShortcutStates(ctx);
-    ctx.ui.setWidget("status-line-which-key", [timerStateLine(), shortcutStateLine()], { placement: "aboveEditor" });
+    ctx.ui.setWidget("status-line-which-key", [timerStateLine(), shortcutLine1(), shortcutLine2()], { placement: "aboveEditor" });
   }
 
   function refreshShortcutStateDisplay(ctx: Ctx, options: { sync?: boolean } = {}): void {

@@ -133,15 +133,25 @@ function textContent(result: any): string {
 
 function rangesFromDiff(diff: string | undefined): string {
   if (!diff) return "";
-  const ranges: string[] = [];
+  const changedLines: number[] = [];
   for (const line of diff.replace(/\r\n/g, "\n").split("\n")) {
-    const match = line.match(/^@@\s+-\d+(?:,\d+)?\s+\+(\d+)(?:,(\d+))?\s+@@/);
-    if (!match) continue;
-    const start = Number(match[1]);
-    const count = match[2] == null ? 1 : Number(match[2]);
-    const end = count <= 0 ? start : start + count - 1;
-    ranges.push(`${start}:${end}`);
+    const match = line.match(/^\+\s*(\d+)\s/);
+    if (match) changedLines.push(Number(match[1]));
   }
+  if (changedLines.length === 0) return "";
+  const ranges: string[] = [];
+  let start = changedLines[0];
+  let end = changedLines[0];
+  for (let i = 1; i < changedLines.length; i++) {
+    if (changedLines[i] === end + 1) {
+      end = changedLines[i];
+    } else {
+      ranges.push(`${start}:${end}`);
+      start = changedLines[i];
+      end = changedLines[i];
+    }
+  }
+  ranges.push(`${start}:${end}`);
   return ranges.join(",");
 }
 
@@ -150,9 +160,8 @@ function changedLineCount(diff: string | undefined): number {
   let added = 0;
   let removed = 0;
   for (const raw of diff.replace(/\r\n/g, "\n").split("\n")) {
-    if (raw.startsWith("+++") || raw.startsWith("---")) continue;
     if (raw.startsWith("+")) added++;
-    if (raw.startsWith("-")) removed++;
+    else if (raw.startsWith("-")) removed++;
   }
   return Math.max(added, removed);
 }
@@ -161,35 +170,18 @@ function compactDiffLines(diff: string | undefined): DiffLine[] {
   if (!diff) return [];
 
   const out: DiffLine[] = [];
-  let inHunk = false;
-  let hunkHasChanges = false;
 
   for (const raw of diff.replace(/\r\n/g, "\n").split("\n")) {
     if (!raw) continue;
-    if (raw.startsWith("diff --git") || raw.startsWith("index ") || raw.startsWith("--- ") || raw.startsWith("+++ ")) continue;
-
-    const hunk = raw.match(/^@@\s+-\d+(?:,\d+)?\s+\+\d+(?:,\d+)?\s+@@/);
-    if (hunk) {
-      if (out.length > 0 && hunkHasChanges) out.push({ kind: "muted", text: "..." });
-      inHunk = true;
-      hunkHasChanges = false;
-      continue;
-    }
-    if (!inHunk) continue;
-
-    if (raw.startsWith("-")) {
-      out.push({ kind: "remove", text: `- ${raw.slice(1)}` });
-      hunkHasChanges = true;
-      continue;
-    }
     if (raw.startsWith("+")) {
-      out.push({ kind: "add", text: `+ ${raw.slice(1)}` });
-      hunkHasChanges = true;
+      const text = raw.replace(/^\+\s*\d+\s?/, "");
+      out.push({ kind: "add", text: `+ ${text}` });
+    } else if (raw.startsWith("-")) {
+      const text = raw.replace(/^-\s*\d+\s?/, "");
+      out.push({ kind: "remove", text: `- ${text}` });
     }
   }
 
-  while (out[0]?.text === "...") out.shift();
-  while (out[out.length - 1]?.text === "...") out.pop();
   return out;
 }
 
@@ -197,29 +189,18 @@ function expandedDiffLines(diff: string | undefined): DiffLine[] {
   if (!diff) return [];
 
   const out: DiffLine[] = [];
-  let inHunk = false;
 
   for (const raw of diff.replace(/\r\n/g, "\n").split("\n")) {
     if (!raw) continue;
-    if (raw.startsWith("diff --git") || raw.startsWith("index ") || raw.startsWith("--- ") || raw.startsWith("+++ ")) continue;
-
-    if (/^@@\s+-\d+(?:,\d+)?\s+\+\d+(?:,\d+)?\s+@@/.test(raw)) {
-      inHunk = true;
-      out.push({ kind: "muted", text: raw });
-      continue;
-    }
-    if (!inHunk) continue;
-
-    if (raw.startsWith("-")) {
-      out.push({ kind: "remove", text: `- ${raw.slice(1)}` });
-      continue;
-    }
     if (raw.startsWith("+")) {
-      out.push({ kind: "add", text: `+ ${raw.slice(1)}` });
-      continue;
-    }
-    if (raw.startsWith(" ")) {
-      out.push({ kind: "muted", text: `  ${raw.slice(1)}` });
+      const text = raw.replace(/^\+\s*\d+\s?/, "");
+      out.push({ kind: "add", text: `+ ${text}` });
+    } else if (raw.startsWith("-")) {
+      const text = raw.replace(/^-\s*\d+\s?/, "");
+      out.push({ kind: "remove", text: `- ${text}` });
+    } else if (raw.startsWith(" ")) {
+      const text = raw.replace(/^\s*\d+\s?/, "");
+      out.push({ kind: "muted", text: `  ${text}` });
     }
   }
 

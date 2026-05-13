@@ -6,6 +6,8 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { isToolCallEventType } from "@mariozechner/pi-coding-agent";
 import { confirmOverlay } from "./confirm-overlay";
 
+const YOLO_ACTIVE = Symbol.for("pi.extensions.yolo.active");
+
 type Severity = "medium" | "high" | "critical";
 
 type DangerousRule = {
@@ -252,6 +254,8 @@ function formatMatches(matches: MatchResult[]): string {
 export default function (pi: ExtensionAPI) {
   pi.on("tool_call", async (event, ctx) => {
     if (!isToolCallEventType("bash", event)) return;
+
+    if ((globalThis as any)[YOLO_ACTIVE]) return;
 
     const command = event.input.command;
     const matches = detectDangerousCommand(command);
