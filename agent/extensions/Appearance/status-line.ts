@@ -54,9 +54,10 @@ function color(text: string, c: string): string {
   return `${c}${text}${RESET}`;
 }
 
-function shortcutPill(keyText: string, label: string, active: boolean): string {
+function shortcutPill(keyText: string, label: string, active: boolean, activeColor?: string): string {
   const bg = active ? PILL_ACTIVE_BG : PILL_INACTIVE_BG;
-  return `${bg}${DIM}${keyText}${DIM_OFF} ${label}${RESET}`;
+  const labelText = active && activeColor ? `${activeColor}${label}${RESET}` : label;
+  return `${bg}${DIM}${keyText}${DIM_OFF} ${labelText}${RESET}`;
 }
 
 function readThinkingHidden(): boolean {
@@ -341,7 +342,7 @@ export default function (pi: ExtensionAPI) {
   function shortcutLine1(): string {
     const tools = shortcutPill("Ctrl+O", "tools", toolsExpanded);
     const thinking = shortcutPill("Ctrl+T", "thinking", !thinkingHidden);
-    const yolo = shortcutPill("Ctrl+Y", "yolo", yoloActive);
+    const yolo = shortcutPill("Ctrl+Y", "yolo", yoloActive, HIGH);
     const key = (s: string) => color(s, DIM);
     return `${tools}  ${thinking}  ${yolo}  ${key("Ctrl+L")} model     ${key("Ctrl+G")} editor`;
   }
