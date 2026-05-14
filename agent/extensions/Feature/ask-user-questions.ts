@@ -255,6 +255,7 @@ class AskUserQuestionsDialog {
     const continuationPrefix = " ".repeat(visibleWidth(prefix));
     const contentWidth = Math.max(8, width - visibleWidth(prefix) - 2);
     let consumed = 0;
+    let isFirstVisualLine = true;
 
     for (let lineIndex = 0; lineIndex < logicalLines.length; lineIndex++) {
       const logicalLine = logicalLines[lineIndex];
@@ -262,20 +263,53 @@ class AskUserQuestionsDialog {
       const lineStart = consumed;
       const lineEnd = lineStart + lineChars.length;
       const cursorOnLine = focused && cursor >= lineStart && cursor <= lineEnd;
-      let renderedContent: string;
 
-      if (cursorOnLine) {
-        const localCursor = Math.max(0, Math.min(lineChars.length, cursor - lineStart));
-        const before = lineChars.slice(0, localCursor).join("");
-        const atCursor = lineChars[localCursor] ?? " ";
-        const after = lineChars.slice(localCursor + (lineChars[localCursor] === undefined ? 0 : 1)).join("");
-        renderedContent = `${fg(this.theme, colorName, before)}${CURSOR_MARKER}\x1b[7m${fg(this.theme, colorName, atCursor)}\x1b[27m${fg(this.theme, colorName, after)}`;
+      // Split lineChars into visual chunks that fit within contentWidth
+      const chunks: Array<{ chars: string[]; startOffset: number }> = [];
+      if (lineChars.length === 0) {
+        chunks.push({ chars: [], startOffset: 0 });
       } else {
-        renderedContent = fg(this.theme, colorName, logicalLine);
+        let chunkStart = 0;
+        while (chunkStart < lineChars.length) {
+          // Measure characters until we fill contentWidth
+          let chunkEnd = chunkStart;
+          let currentWidth = 0;
+          while (chunkEnd < lineChars.length) {
+            const charWidth = visibleWidth(lineChars[chunkEnd]);
+            if (currentWidth + charWidth > contentWidth) break;
+            currentWidth += charWidth;
+            chunkEnd++;
+          }
+          // Ensure at least one character per chunk to avoid infinite loop
+          if (chunkEnd === chunkStart) chunkEnd = chunkStart + 1;
+          chunks.push({ chars: lineChars.slice(chunkStart, chunkEnd), startOffset: chunkStart });
+          chunkStart = chunkEnd;
+        }
       }
 
-      const padded = this.padToWidth(truncateToWidth(renderedContent, contentWidth, ""), contentWidth);
-      pushLine(lines, width, `${lineIndex === 0 ? prefix : continuationPrefix}${bg(this.theme, backgroundName, ` ${padded} `)}`);
+      for (const chunk of chunks) {
+        const chunkText = chunk.chars.join("");
+        const chunkStartAbs = lineStart + chunk.startOffset;
+        const chunkEndAbs = chunkStartAbs + chunk.chars.length;
+        const cursorInChunk = cursorOnLine && cursor >= chunkStartAbs && cursor <= chunkEndAbs;
+        let renderedContent: string;
+
+        if (cursorInChunk) {
+          const localCursor = cursor - chunkStartAbs;
+          const before = chunk.chars.slice(0, localCursor).join("");
+          const atCursor = chunk.chars[localCursor] ?? " ";
+          const after = chunk.chars.slice(localCursor + (chunk.chars[localCursor] === undefined ? 0 : 1)).join("");
+          renderedContent = `${fg(this.theme, colorName, before)}${CURSOR_MARKER}\x1b[7m${fg(this.theme, colorName, atCursor)}\x1b[27m${fg(this.theme, colorName, after)}`;
+        } else {
+          renderedContent = fg(this.theme, colorName, chunkText);
+        }
+
+        const padded = this.padToWidth(truncateToWidth(renderedContent, contentWidth, ""), contentWidth);
+        const linePrefix = isFirstVisualLine ? prefix : continuationPrefix;
+        pushLine(lines, width, `${linePrefix}${bg(this.theme, backgroundName, ` ${padded} `)}`);
+        isFirstVisualLine = false;
+      }
+
       consumed = lineEnd + 1;
     }
   }

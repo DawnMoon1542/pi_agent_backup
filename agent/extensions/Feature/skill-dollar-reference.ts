@@ -121,13 +121,18 @@ function extractDollarToken(textBeforeCursor: string): DollarToken | undefined {
     };
   }
 
-  if (!rawQuery.startsWith(SKILL_COMMAND_PREFIX)) {
-    return undefined;
+  if (rawQuery.startsWith(SKILL_COMMAND_PREFIX)) {
+    return {
+      prefix: textBeforeCursor.slice(dollarIndex),
+      query: rawQuery.slice(SKILL_COMMAND_PREFIX.length),
+    };
   }
 
+  // Allow fuzzy matching without the skill: prefix
+  // e.g. $br -> fuzzy match against skill names with query "br"
   return {
     prefix: textBeforeCursor.slice(dollarIndex),
-    query: rawQuery.slice(SKILL_COMMAND_PREFIX.length),
+    query: rawQuery,
   };
 }
 
