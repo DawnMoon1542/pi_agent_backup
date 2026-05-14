@@ -6,6 +6,7 @@ import formFilling from "./form-filling";
 import retryPolicy from "./retry-policy";
 import skillDollarReference from "./skill-dollar-reference";
 import stats from "./stats";
+import rtkOptimizer from "./pi-rtk-optimizer/src/index";
 
 export default async function (pi: ExtensionAPI) {
   await Promise.resolve(askUserQuestions(pi));
@@ -14,4 +15,5 @@ export default async function (pi: ExtensionAPI) {
   await Promise.resolve(retryPolicy(pi));
   await Promise.resolve(skillDollarReference(pi));
   await Promise.resolve(stats(pi));
+  rtkOptimizer(pi);
 }
