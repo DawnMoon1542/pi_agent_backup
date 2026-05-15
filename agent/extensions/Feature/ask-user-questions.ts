@@ -3,7 +3,7 @@
 // @description: 注册 AskUserQuestions 工具，通过自定义 TUI 向用户提出 1-5 个带选项的问题
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { CURSOR_MARKER, Key, matchesKey, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { CURSOR_MARKER, Key, matchesKey, Text, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
   bg,
@@ -471,9 +471,25 @@ class AskUserQuestionsDialog {
       const option = question.options[i];
       const focused = this.focusIndex === i;
       const selected = answer?.type === "option" && answer.optionId === option.id;
-      const raw = `${focusPrefix(this.theme, focused)}${selectedMark(selected)} ${option.label}`;
-      const styled = focused ? bg(this.theme, "selectedBg", fg(this.theme, selected ? "success" : "accent", raw)) : fg(this.theme, selected ? "success" : "text", raw);
-      pushLine(lines, width, styled);
+      const prefix = `${focusPrefix(this.theme, focused)}${selectedMark(selected)} `;
+      const colorName = selected ? "success" : (focused ? "accent" : "text");
+      const styledPrefix = focused
+        ? bg(this.theme, "selectedBg", fg(this.theme, colorName, prefix))
+        : fg(this.theme, colorName, prefix);
+      const labelWidth = Math.max(12, width - visibleWidth(prefix) - 2);
+      const wrapped = wrapTextWithAnsi(fg(this.theme, colorName, option.label), labelWidth);
+      if (wrapped.length === 0) {
+        const line = styledPrefix;
+        lines.push(focused ? bg(this.theme, "selectedBg", line) : line);
+      } else {
+        const firstLine = `${styledPrefix}${wrapped[0]}`;
+        lines.push(focused ? bg(this.theme, "selectedBg", firstLine) : firstLine);
+        const continuationIndent = " ".repeat(visibleWidth(prefix));
+        for (let j = 1; j < wrapped.length; j++) {
+          const contLine = `${continuationIndent}${wrapped[j]}`;
+          lines.push(focused ? bg(this.theme, "selectedBg", contLine) : contLine);
+        }
+      }
     }
 
     lines.push("");

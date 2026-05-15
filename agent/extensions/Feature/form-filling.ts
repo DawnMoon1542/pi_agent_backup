@@ -4,7 +4,7 @@
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
-import { Key, matchesKey, Text, truncateToWidth } from "@earendil-works/pi-tui";
+import { Key, matchesKey, Text, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
   bg,
@@ -485,23 +485,57 @@ class FormFillingDialog {
   }
 
   private renderSelectField(lines: string[], width: number, focused: boolean, field: FormField, state: FieldRuntimeState): void {
-    const parts = (field.options ?? []).map((option, index) => {
+    for (let index = 0; index < (field.options ?? []).length; index++) {
+      const option = (field.options ?? [])[index];
       const itemFocused = focused && state.optionIndex === index;
       const selected = state.selectOptionId === option.id;
-      const raw = `${itemFocused ? ">" : " "} ${this.radioMark(selected)} ${option.label}`;
-      return itemFocused ? bg(this.theme, "selectedBg", fg(this.theme, selected ? "success" : "accent", raw)) : fg(this.theme, selected ? "success" : "text", raw);
-    });
-    pushLine(lines, width, `  ${parts.join("   ")}`);
+      const prefix = `${itemFocused ? ">" : " "} ${this.radioMark(selected)} `;
+      const colorName = selected ? "success" : (itemFocused ? "accent" : "text");
+      const styledPrefix = itemFocused
+        ? bg(this.theme, "selectedBg", fg(this.theme, colorName, prefix))
+        : fg(this.theme, colorName, prefix);
+      const labelWidth = Math.max(12, width - 6 - visibleWidth(prefix));
+      const wrapped = wrapTextWithAnsi(fg(this.theme, colorName, option.label), labelWidth);
+      if (wrapped.length === 0) {
+        const line = `  ${styledPrefix}`;
+        lines.push(itemFocused ? bg(this.theme, "selectedBg", line) : line);
+      } else {
+        const firstLine = `  ${styledPrefix}${wrapped[0]}`;
+        lines.push(itemFocused ? bg(this.theme, "selectedBg", firstLine) : firstLine);
+        const continuationIndent = " ".repeat(2 + visibleWidth(prefix));
+        for (let i = 1; i < wrapped.length; i++) {
+          const contLine = `${continuationIndent}${wrapped[i]}`;
+          lines.push(itemFocused ? bg(this.theme, "selectedBg", contLine) : contLine);
+        }
+      }
+    }
   }
 
   private renderMultiselectField(lines: string[], width: number, focused: boolean, field: FormField, state: FieldRuntimeState): void {
-    const parts = (field.options ?? []).map((option, index) => {
+    for (let index = 0; index < (field.options ?? []).length; index++) {
+      const option = (field.options ?? [])[index];
       const itemFocused = focused && state.optionIndex === index;
       const selected = state.multiselectOptionIds.has(option.id);
-      const raw = `${itemFocused ? ">" : " "} ${this.checkboxMark(selected)} ${option.label}`;
-      return itemFocused ? bg(this.theme, "selectedBg", fg(this.theme, selected ? "success" : "accent", raw)) : fg(this.theme, selected ? "success" : "text", raw);
-    });
-    pushLine(lines, width, `  ${parts.join("   ")}`);
+      const prefix = `${itemFocused ? ">" : " "} ${this.checkboxMark(selected)} `;
+      const colorName = selected ? "success" : (itemFocused ? "accent" : "text");
+      const styledPrefix = itemFocused
+        ? bg(this.theme, "selectedBg", fg(this.theme, colorName, prefix))
+        : fg(this.theme, colorName, prefix);
+      const labelWidth = Math.max(12, width - 6 - visibleWidth(prefix));
+      const wrapped = wrapTextWithAnsi(fg(this.theme, colorName, option.label), labelWidth);
+      if (wrapped.length === 0) {
+        const line = `  ${styledPrefix}`;
+        lines.push(itemFocused ? bg(this.theme, "selectedBg", line) : line);
+      } else {
+        const firstLine = `  ${styledPrefix}${wrapped[0]}`;
+        lines.push(itemFocused ? bg(this.theme, "selectedBg", firstLine) : firstLine);
+        const continuationIndent = " ".repeat(2 + visibleWidth(prefix));
+        for (let i = 1; i < wrapped.length; i++) {
+          const contLine = `${continuationIndent}${wrapped[i]}`;
+          lines.push(itemFocused ? bg(this.theme, "selectedBg", contLine) : contLine);
+        }
+      }
+    }
   }
 
   private renderField(lines: string[], width: number, field: FormField, index: number): void {
