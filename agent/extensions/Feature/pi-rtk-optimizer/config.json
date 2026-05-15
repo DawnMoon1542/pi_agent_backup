@@ -1,6 +1,6 @@
 {
   "enabled": true,
-  "mode": "rewrite",
+  "mode": "suggest",
   "guardWhenRtkMissing": true,
   "showRewriteNotifications": false,
   "outputCompaction": {
@@ -11,20 +11,20 @@
     },
     "sourceCodeFilteringEnabled": false,
     "preserveExactSkillReads": true,
+    "truncate": {
+      "enabled": false,
+      "maxChars": 12000
+    },
     "sourceCodeFiltering": "none",
+    "smartTruncate": {
+      "enabled": false,
+      "maxLines": 220
+    },
     "aggregateTestOutput": true,
     "filterBuildOutput": true,
     "compactGitOutput": true,
     "aggregateLinterOutput": true,
     "groupSearchOutput": true,
-    "trackSavings": true,
-    "smartTruncate": {
-      "enabled": false,
-      "maxLines": 220
-    },
-    "truncate": {
-      "enabled": false,
-      "maxChars": 12000
-    }
+    "trackSavings": true
   }
 }

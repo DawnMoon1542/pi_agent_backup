@@ -7,23 +7,76 @@ cd "$SCRIPT_DIR"
 REMOTE_URL="https://github.com/arpagon/pi-rewind.git"
 BRANCH="main"
 
+PATCH_FILE="$SCRIPT_DIR/local.patch"
+BACKUP_DIR="$SCRIPT_DIR/.update-backup"
+
+cleanup() {
+  rm -f "$PATCH_FILE"
+  rm -rf "$BACKUP_DIR"
+}
+trap cleanup EXIT
+
+# 备份本地修改的源文件
+rm -rf "$BACKUP_DIR"
+mkdir -p "$BACKUP_DIR"
+
+files_to_backup=(
+  "src/index.ts"
+  "src/commands.ts"
+  "src/ui.ts"
+)
+
+for f in "${files_to_backup[@]}"; do
+  if [ -f "$f" ]; then
+    mkdir -p "$BACKUP_DIR/$(dirname "$f")"
+    cp "$f" "$BACKUP_DIR/$f"
+    echo "==> Backed up $f"
+  fi
+done
+
 echo "==> Initializing temporary git repo..."
 git init
-git remote add origin "$REMOTE_URL"
+git add -A
+git commit -m "local" --quiet
 
+git remote add origin "$REMOTE_URL"
 echo "==> Fetching $BRANCH from origin..."
-git fetch origin "$BRANCH"
+git fetch origin "$BRANCH" --quiet
+
+echo "==> Extracting local patch..."
+git diff "origin/$BRANCH"..HEAD -- "src/" > "$PATCH_FILE"
+LOCAL_DIFF_SIZE=$(wc -c < "$PATCH_FILE" | tr -d ' ')
 
 echo "==> Resetting to origin/$BRANCH..."
-git reset --hard "origin/$BRANCH"
+git reset --hard "origin/$BRANCH" --quiet
 
 echo "==> Removing .git directory..."
 rm -rf .git
 
-echo "==> Applying local patches (import path + bug fix)..."
-sed -i '' 's|@mariozechner/pi-coding-agent|@earendil-works/pi-coding-agent|g' \
-  src/index.ts src/commands.ts src/ui.ts
+# 尝试应用本地修改（之前通过 sed 打入的 import 路径补丁和 bug fix）
+if [ "$LOCAL_DIFF_SIZE" -gt 0 ]; then
+  echo "==> Re-applying local modifications..."
+  if git apply "$PATCH_FILE" 2>/dev/null; then
+    echo "==> Local modifications applied cleanly."
+    rm -rf "$BACKUP_DIR"
+  else
+    echo ""
+    echo "⚠️  CONFLICT: local modifications could not be applied cleanly."
+    echo "   Upstream changes conflict with local patches."
+    echo "   Upstream version has been applied as-is."
+    echo "   Your previous local modifications are backed up at:"
+    for f in "${files_to_backup[@]}"; do
+      if [ -f "$BACKUP_DIR/$f" ]; then
+        echo "     $BACKUP_DIR/$f"
+      fi
+    done
+    echo "   The failed patch is at: $PATCH_FILE"
+    echo "   Resolve conflicts manually, then remove the backup directory."
+    echo ""
+  fi
+else
+  echo "==> No local modifications to apply."
+  rm -rf "$BACKUP_DIR"
+fi
 
-sed -i '' 's|state\.root)|state.repoRoot!)|g' src/commands.ts
-
-echo "==> Done. Review changes with: git diff"
+echo "==> Done."
