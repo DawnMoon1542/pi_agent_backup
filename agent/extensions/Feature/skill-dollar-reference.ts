@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { CustomEditor, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
@@ -89,18 +88,6 @@ function findSkillRefSpanAtCursor(line: string, cursorCol: number): SkillRefSpan
   }
 
   return undefined;
-}
-
-function stripFrontmatter(content: string): string {
-  return content.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, "");
-}
-
-function escapeXmlAttribute(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/"/g, "&quot;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
 }
 
 function extractDollarToken(textBeforeCursor: string): DollarToken | undefined {
@@ -284,15 +271,6 @@ function createDollarSkillAutocompleteProvider(pi: ExtensionAPI, current: Autoco
   };
 }
 
-function buildSkillBlock(skill: SkillLike): string {
-  const content = readFileSync(skill.filePath, "utf-8");
-  const body = stripFrontmatter(content).trim();
-  const location = escapeXmlAttribute(skill.filePath);
-  const name = escapeXmlAttribute(skill.name);
-
-  return `<skill name="${name}" location="${location}">\nReferences are relative to ${skill.baseDir}.\n\n${body}\n</skill>`;
-}
-
 function resolveSkillBaseDir(command: SkillCommandLike): string {
   return command.sourceInfo.baseDir ?? dirname(command.sourceInfo.path);
 }
@@ -369,13 +347,30 @@ class DollarSkillEditor extends CustomEditor {
 }
 
 export default function (pi: ExtensionAPI): void {
+  let pendingSkillNames: string[] = [];
+
   pi.on("session_start", (_event, ctx) => {
     ctx.ui.addAutocompleteProvider((current) => createDollarSkillAutocompleteProvider(pi, current));
     ctx.ui.setEditorComponent((tui, theme, keybindings) => new DollarSkillEditor(tui, theme, keybindings));
   });
 
+  pi.on("input", (event) => {
+    const names = uniqueInOrder(extractSkillReferenceNames(event.text));
+    if (names.length === 0) {
+      return { action: "continue" as const };
+    }
+
+    pendingSkillNames = names;
+    return { action: "continue" as const };
+  });
+
   pi.on("before_agent_start", (event, ctx) => {
-    const referencedNames = uniqueInOrder(extractSkillReferenceNames(event.prompt));
+    const namesFromInput = pendingSkillNames;
+    pendingSkillNames = [];
+
+    const namesFromPrompt = uniqueInOrder(extractSkillReferenceNames(event.prompt));
+    const referencedNames = uniqueInOrder([...namesFromInput, ...namesFromPrompt]);
+
     if (referencedNames.length === 0) {
       return undefined;
     }
@@ -389,31 +384,8 @@ export default function (pi: ExtensionAPI): void {
       return undefined;
     }
 
-    const blocks: string[] = [];
-    const failed: string[] = [];
-
-    for (const skill of referencedSkills) {
-      try {
-        blocks.push(buildSkillBlock(skill));
-      } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        failed.push(`${skill.name}: ${reason}`);
-      }
-    }
-
-    if (failed.length > 0 && ctx.hasUI) {
-      ctx.ui.notify(`Failed to load referenced skill(s): ${failed.join("; ")}`, "warning");
-    }
-
-    if (blocks.length === 0) {
-      return undefined;
-    }
-
-    const content = [
-      "The user referenced the following skills with $skill:name syntax. Use these skill instructions as additional context for this turn. The visible user prompt remains unchanged.",
-      "",
-      blocks.join("\n\n"),
-    ].join("\n");
+    const paths = referencedSkills.map((skill) => skill.filePath);
+    const content = paths.join("\n");
 
     return {
       message: {
