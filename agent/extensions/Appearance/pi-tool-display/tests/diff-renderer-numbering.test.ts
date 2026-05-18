@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Box, type Component } from "@mariozechner/pi-tui";
+import { Box, type Component } from "@earendil-works/pi-tui";
 import { renderEditDiffResult } from "../src/diff-renderer.ts";
 
 const theme = {

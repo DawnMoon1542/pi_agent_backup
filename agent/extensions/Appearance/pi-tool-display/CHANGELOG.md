@@ -33,7 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added preview fallback notices when projected edit previews cannot be resolved deterministically from the current file contents
 
 ### Changed
-- Updated `@mariozechner/pi-coding-agent` and `@mariozechner/pi-tui` peer dependencies to `^0.70.2`
+- Updated `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui` peer dependencies to `^0.70.2`
 - Diff renderer write headers now support contextual action labels so pending previews can display `pending edit`, `pending overwrite`, and `pending create`
 
 ### Fixed
@@ -47,7 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Config modal dropdown for diff indicator style selection under "Diff indicators" setting
 
 ### Changed
-- Updated `@mariozechner/pi-coding-agent` and `@mariozechner/pi-tui` peer dependencies to `^0.67.2`
+- Updated `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui` peer dependencies to `^0.67.2`
 - Config path resolution now uses `getAgentDir()` API to correctly respect `PI_CODING_AGENT_DIR` environment variable (thanks to @tynanbe for PR #6)
 - Diff renderer now supports mode-aware indicator glyph resolution (bars, classic, none)
 - Line prefix width calculations adjusted per indicator mode for accurate diff column alignment
@@ -76,7 +76,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `applyLineBackgroundToWidth()` helper for consistent line background handling in diff renderer
 
 ### Changed
-- Updated `@mariozechner/pi-coding-agent` and `@mariozechner/pi-tui` peer dependencies to ^0.64.0
+- Updated `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui` peer dependencies to ^0.64.0
 - Refactored tool-overrides to use context-based argument extraction instead of closure state
 - Improved diff renderer width handling with cleaner background reset logic
 - Simplified continuation prefix rendering by removing unnecessary row background parameters
@@ -129,7 +129,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keywords for better npm discoverability: `hide`, `collapse`, `truncate`, `compact`, `diff`, `output-mode`
 
 ### Changed
-- Updated `@mariozechner/pi-coding-agent` and `@mariozechner/pi-tui` peer dependencies to ^0.62.0
+- Updated `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui` peer dependencies to ^0.62.0
 - Extracted shared utilities to dedicated `tool-metadata.ts` module for reuse across capabilities and tool-overrides
 - Refactored tool-overrides to preserve `promptSnippet` and `promptGuidelines` on overridden read, edit, and write tools
 - Improved diff renderer with accurate line number tracking and line number delta calculation for proper hunk tracking

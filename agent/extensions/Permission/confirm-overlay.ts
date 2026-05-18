@@ -1,4 +1,4 @@
-import { InteractiveMode } from "@mariozechner/pi-coding-agent";
+import { InteractiveMode } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 
 const ABOVE_STATUS_PATCHED = Symbol.for("pi.extensions.permission-confirm.aboveStatusPatched.v2");

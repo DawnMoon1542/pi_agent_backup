@@ -2837,7 +2837,7 @@ exec
 /bin/bash -lc "ls -la /tmp/agent-research/pi-hooks && rg -n \"checkpoint|restore|fork|conversation|git|ref|undo|rewind|tree|session_before|session_start|hook\" -S /tmp/agent-research/pi-hooks --glob '"'!**/node_modules/**'"'" in /home/arpagon/Workspace/arpagon-01-med.arpagon.local succeeded in 50ms:
 # pi-extensions
 
-Minimal reference extensions for [`pi-coding-agent`](https://www.npmjs.com/package/@mariozechner/pi-coding-agent).
+Minimal reference extensions for [`pi-coding-agent`](https://www.npmjs.com/package/@earendil-works/pi-coding-agent).
 
 ## Quick Setup
 
@@ -2905,7 +2905,7 @@ exec
 /bin/bash -lc "sed -n '1,260p' /tmp/agent-research/pi-hooks/checkpoint/README.md" in /home/arpagon/Workspace/arpagon-01-med.arpagon.local succeeded in 51ms:
 # checkpoint extension
 
-Git-based checkpoint extension for [`pi-coding-agent`](https://www.npmjs.com/package/@mariozechner/pi-coding-agent).
+Git-based checkpoint extension for [`pi-coding-agent`](https://www.npmjs.com/package/@earendil-works/pi-coding-agent).
 
 ## What it does
 
@@ -5629,7 +5629,7 @@ exec
  * Updated for pi-coding-agent v0.35.0+ (unified extensions system)
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { exec as execCb } from "child_process";
 import { readFileSync } from "fs";
 import { mkdtemp, rm } from "fs/promises";
@@ -5648,7 +5648,7 @@ exec
 /bin/bash -lc "sed -n '1,320p' /tmp/agent-research/pi-hooks/checkpoint/index.ts && sed -n '1,320p' /tmp/agent-research/pi-hooks/checkpoint/checkpoint-core.ts && sed -n '1,260p' /tmp/agent-research/pi-hooks/checkpoint/utils.ts" in /home/arpagon/Workspace/arpagon-01-med.arpagon.local succeeded in 51ms:
 # checkpoint extension
 
-Git-based checkpoint extension for [`pi-coding-agent`](https://www.npmjs.com/package/@mariozechner/pi-coding-agent).
+Git-based checkpoint extension for [`pi-coding-agent`](https://www.npmjs.com/package/@earendil-works/pi-coding-agent).
 
 ## What it does
 
@@ -5685,7 +5685,7 @@ checkpoint.test.ts
 /tmp/agent-research/pi-hooks/checkpoint/package.json:11:    "checkpoint",
 /tmp/agent-research/pi-hooks/checkpoint/package.json:20:      "./checkpoint.ts"
 /tmp/agent-research/pi-hooks/checkpoint/README.md:1:# checkpoint extension
-/tmp/agent-research/pi-hooks/checkpoint/README.md:3:Git-based checkpoint extension for [`pi-coding-agent`](https://www.npmjs.com/package/@mariozechner/pi-coding-agent).
+/tmp/agent-research/pi-hooks/checkpoint/README.md:3:Git-based checkpoint extension for [`pi-coding-agent`](https://www.npmjs.com/package/@earendil-works/pi-coding-agent).
 /tmp/agent-research/pi-hooks/checkpoint/README.md:7:- Saves the full worktree (tracked + untracked) at the start of every turn
  exited 2 in 50ms:
 sed: can't read /tmp/agent-research/pi-hooks/checkpoint/index.ts: No such file or directory

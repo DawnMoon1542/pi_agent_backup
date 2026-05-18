@@ -2,7 +2,7 @@
 // @category: model
 // @description: 将请求失败自动重试改为 10 次，基础间隔 1 秒，provider 最大重试等待 5 分钟
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";

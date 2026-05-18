@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Box, visibleWidth, type Component } from "@mariozechner/pi-tui";
+import { Box, visibleWidth, type Component } from "@earendil-works/pi-tui";
 import { buildDiffSummaryText, resolveDiffPresentationMode } from "../src/diff-presentation.ts";
 import { renderEditDiffResult, renderWriteDiffResult } from "../src/diff-renderer.ts";
 

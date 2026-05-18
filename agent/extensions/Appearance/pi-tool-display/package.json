@@ -63,8 +63,8 @@
     ]
   },
   "peerDependencies": {
-    "@mariozechner/pi-coding-agent": "^0.72.0",
-    "@mariozechner/pi-tui": "^0.72.0"
+    "@earendil-works/pi-coding-agent": "^0.72.0",
+    "@earendil-works/pi-tui": "^0.72.0"
   },
   "overrides": {
     "file-type": ">=21.3.1"

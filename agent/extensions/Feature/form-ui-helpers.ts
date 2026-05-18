@@ -1,4 +1,4 @@
-import { InteractiveMode } from "@mariozechner/pi-coding-agent";
+import { InteractiveMode } from "@earendil-works/pi-coding-agent";
 import { CURSOR_MARKER, decodeKittyPrintable, Key, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 
 const ABOVE_STATUS_PATCHED = Symbol.for("pi.extensions.feature-user-tools.aboveStatusPatched.v1");

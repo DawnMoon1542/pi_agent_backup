@@ -2,7 +2,7 @@
 // @category: ui
 // @description: 注册 AskUserQuestions 工具，通过自定义 TUI 向用户提出 1-5 个带选项的问题
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { CURSOR_MARKER, Key, matchesKey, Text, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {

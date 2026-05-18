@@ -2,7 +2,7 @@
 // @category: agent
 // @description: 在每次 AI 响应前注入额外的系统提示指令(如角色设定、输出格式要求)
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export default function (pi: ExtensionAPI) {
   // 你可以在这里自定义要注入的指令

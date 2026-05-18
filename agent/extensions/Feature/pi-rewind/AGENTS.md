@@ -34,7 +34,7 @@ This project is a fork/rewrite inspired by two existing Pi extensions:
 ## Tech Stack
 
 - TypeScript (loaded via jiti, no compilation needed)
-- Pi extension API (`@mariozechner/pi-coding-agent`)
+- Pi extension API (`@earendil-works/pi-coding-agent`)
 - Git (via `child_process.spawn`, no shell injection)
 - No external runtime dependencies
 

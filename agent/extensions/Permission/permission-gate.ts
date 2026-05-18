@@ -2,8 +2,8 @@
 // @category: security
 // @description: 在执行危险 bash 命令前弹出确认对话框
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { isToolCallEventType } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
 import { confirmOverlay } from "./confirm-overlay";
 
 const YOLO_ACTIVE = Symbol.for("pi.extensions.yolo.active");
