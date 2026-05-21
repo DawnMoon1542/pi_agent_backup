@@ -8,6 +8,15 @@ export default async function (pi: ExtensionAPI) {
     api: "anthropic-messages",
     models: [
       {
+        id: "claude-opus-4-7",
+        name: "Claude Opus 4.7",
+        reasoning: true,
+        input: ["text", "image"],
+        cost: { input: 5.0, output: 25.0, cacheRead: 0.5, cacheWrite: 6.25 },
+        contextWindow: 200_000,
+        maxTokens: 128_000,
+      },
+      {
         id: "claude-opus-4-6",
         name: "Claude Opus 4.6",
         reasoning: true,

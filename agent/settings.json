@@ -1,5 +1,5 @@
 {
-  "lastChangelogVersion": "0.74.0",
+  "lastChangelogVersion": "0.75.1",
   "defaultProvider": "new-api-codex",
   "defaultModel": "gpt-5.5",
   "defaultThinkingLevel": "high",
@@ -24,6 +24,8 @@
     "new-api-codex/gpt-5.5",
     "new-api-claude/deepseek-v4-flash",
     "new-api-claude/deepseek-v4-pro",
-    "new-api-claude/claude-sonnet-4-6"
-  ]
+    "new-api-claude/claude-sonnet-4-6",
+    "new-api-claude/claude-opus-4-7"
+  ],
+  "packages": []
 }
