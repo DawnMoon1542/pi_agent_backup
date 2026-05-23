@@ -1,0 +1,1332 @@
+<!DOCTYPE html>
+<html lang="zh" data-theme="light" style="--rec-label: '★ 推荐'">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="light dark">
+  <title>Pi Agent 扩展体系</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #FAFAF7;
+      --surface: #FFFFFF;
+      --surface-2: #F5F5F0;
+      --surface-3: #EFEEE8;
+      --text: #1A1A1A;
+      --text-muted: #4A4A45;
+      --text-subtle: #6B6B66;
+      --accent: #D97757;
+      --accent-hover: #C56843;
+      --accent-soft: #FBEEE6;
+      --accent-border: #F0D5C4;
+      --accent-strong: #A85533;
+      --border: #E5E4DC;
+      --border-strong: #CDCDC4;
+      --code-bg: #F5F2EC;
+      --code-text: #2A2A2A;
+      --info: #2563EB;
+      --info-soft: #EFF6FF;
+      --info-border: #BFDBFE;
+      --warn: #B45309;
+      --warn-soft: #FFFBEB;
+      --warn-border: #FDE68A;
+      --danger: #B91C1C;
+      --danger-soft: #FEF2F2;
+      --danger-border: #FECACA;
+      --success: #047857;
+      --success-soft: #ECFDF5;
+      --success-border: #A7F3D0;
+      --decision: #6D28D9;
+      --decision-soft: #F5F3FF;
+      --decision-border: #DDD6FE;
+      --shadow-sm: 0 1px 2px rgba(20, 14, 8, 0.04);
+      --shadow: 0 1px 2px rgba(20, 14, 8, 0.04), 0 4px 12px rgba(20, 14, 8, 0.06);
+      --shadow-lg: 0 8px 24px rgba(20, 14, 8, 0.10);
+      --radius: 12px;
+      --radius-sm: 8px;
+      --radius-lg: 16px;
+      --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', 'Noto Sans CJK JP', 'Noto Sans CJK KR', sans-serif;
+      --font-mono: 'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace;
+      --z-progress: 200;
+      --z-topbar: 100;
+      --z-drawer: 300;
+      --z-backdrop: 250;
+    }
+    [data-theme="dark"] {
+      --bg: #1A1714;
+      --surface: #221E1A;
+      --surface-2: #2A2520;
+      --surface-3: #322C26;
+      --text: #F5F0E8;
+      --text-muted: #C8C0B6;
+      --text-subtle: #9A938A;
+      --accent: #E89572;
+      --accent-hover: #F2A87F;
+      --accent-soft: #3A2A22;
+      --accent-border: #5A3D2E;
+      --accent-strong: #F5B493;
+      --border: #2E2924;
+      --border-strong: #463F38;
+      --code-bg: #1E1B17;
+      --code-text: #E8E2D8;
+      --info: #93C5FD;
+      --info-soft: #1E2A3D;
+      --info-border: #2A4365;
+      --warn: #FBBF24;
+      --warn-soft: #332817;
+      --warn-border: #5C4520;
+      --danger: #FCA5A5;
+      --danger-soft: #3A1F1F;
+      --danger-border: #5C2A2A;
+      --success: #6EE7B7;
+      --success-soft: #1A3329;
+      --success-border: #1F5C45;
+      --decision: #C4B5FD;
+      --decision-soft: #2A1F40;
+      --decision-border: #4A3870;
+      --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.25);
+      --shadow: 0 1px 2px rgba(0, 0, 0, 0.25), 0 4px 12px rgba(0, 0, 0, 0.35);
+      --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.45);
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; scroll-padding-top: 80px; }
+    body {
+      margin: 0;
+      font-family: var(--font-sans);
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.65;
+      font-size: 16px;
+      -webkit-font-smoothing: antialiased;
+      transition: background-color 0.2s, color 0.2s;
+    }
+    ::selection { background: var(--accent-soft); color: var(--accent-strong); }
+    .skip-link {
+      position: absolute;
+      top: -100px; left: 8px;
+      padding: 10px 16px;
+      background: var(--accent);
+      color: #fff;
+      text-decoration: none;
+      border-radius: var(--radius-sm);
+      font-weight: 500;
+      z-index: 1000;
+      transition: top 0.15s;
+    }
+    .skip-link:focus { top: 8px; }
+    .icon-sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
+    .icon { display: inline-block; flex-shrink: 0; vertical-align: middle; stroke: currentColor; fill: none; }
+    .scroll-progress {
+      position: fixed;
+      top: 0; left: 0;
+      height: 2px;
+      width: 0;
+      background: var(--accent);
+      z-index: var(--z-progress);
+      transition: width 0.05s linear;
+    }
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: var(--z-topbar);
+      background: rgba(250, 250, 247, 0.85);
+      backdrop-filter: saturate(180%) blur(12px);
+      -webkit-backdrop-filter: saturate(180%) blur(12px);
+      border-bottom: 1px solid var(--border);
+    }
+    [data-theme="dark"] .topbar { background: rgba(26, 23, 20, 0.85); }
+    .topbar-inner {
+      max-width: 1280px;
+      margin: 0 auto;
+      padding: 10px 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 600;
+      color: var(--text);
+      font-size: 14px;
+    }
+    .brand-dot {
+      width: 10px; height: 10px; border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 0 4px var(--accent-soft);
+      animation: brand-pulse 2.8s ease-in-out infinite;
+    }
+    @keyframes brand-pulse {
+      0%, 100% { box-shadow: 0 0 0 4px var(--accent-soft); }
+      50%      { box-shadow: 0 0 0 7px transparent; }
+    }
+    .topbar-actions { display: flex; gap: 6px; align-items: center; }
+    .icon-btn {
+      width: 40px; height: 40px;
+      display: inline-flex; align-items: center; justify-content: center;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--text-muted);
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      transition: color 0.15s, border-color 0.15s, background-color 0.15s;
+      padding: 0;
+    }
+    .icon-btn .icon { width: 18px; height: 18px; stroke-width: 2; }
+    .icon-btn[hidden] { display: none; }
+    .layout {
+      max-width: 1280px;
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: 260px 1fr;
+      gap: 48px;
+      padding: 32px 24px 96px;
+    }
+    .content { min-width: 0; }
+    .toc {
+      position: sticky;
+      top: 80px;
+      align-self: start;
+      max-height: calc(100vh - 100px);
+      overflow-y: auto;
+      padding-right: 8px;
+    }
+    .toc::-webkit-scrollbar { width: 6px; }
+    .toc::-webkit-scrollbar-track { background: transparent; }
+    .toc::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 3px; }
+    .toc-head {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 12px 12px;
+    }
+    .toc-title {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-subtle);
+      margin: 0;
+    }
+    .toc-close { display: none; }
+    .toc-nav { display: flex; flex-direction: column; gap: 2px; }
+    .toc-nav a {
+      display: flex; align-items: center;
+      min-height: 36px;
+      padding: 8px 14px;
+      color: var(--text-muted);
+      text-decoration: none;
+      font-size: 13.5px;
+      border-left: 2px solid transparent;
+      border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+      transition: color 0.15s, background-color 0.15s, border-color 0.15s;
+      line-height: 1.4;
+    }
+    .toc-nav a.active {
+      color: var(--accent);
+      border-left-color: var(--accent);
+      background: var(--accent-soft);
+      font-weight: 500;
+    }
+    .toc-nav a.lvl-3 { padding-left: 26px; font-size: 12.5px; }
+    .toc-backdrop {
+      display: none;
+      position: fixed; inset: 0;
+      background: rgba(0, 0, 0, 0.45);
+      z-index: var(--z-backdrop);
+      opacity: 0;
+      transition: opacity 0.2s;
+    }
+    .doc-header {
+      margin-bottom: 40px;
+      padding-bottom: 24px;
+      border-bottom: 1px solid var(--border);
+    }
+    .doc-eyebrow {
+      display: inline-flex; align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      background: var(--accent-soft);
+      color: var(--accent-strong);
+      border: 1px solid var(--accent-border);
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 500;
+      letter-spacing: 0.04em;
+      margin-bottom: 16px;
+    }
+    .doc-title {
+      font-size: clamp(28px, 3vw + 16px, 40px);
+      font-weight: 700;
+      line-height: 1.15;
+      letter-spacing: -0.02em;
+      margin: 0 0 12px;
+      color: var(--text);
+      text-wrap: balance;
+    }
+    .doc-subtitle {
+      font-size: clamp(15px, 0.6vw + 13px, 18px);
+      color: var(--text-muted);
+      line-height: 1.55;
+      margin: 0 0 20px;
+      max-width: 75ch;
+      text-wrap: pretty;
+    }
+    .doc-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 16px;
+      font-size: 13px;
+      color: var(--text-subtle);
+    }
+    .doc-meta-item { display: inline-flex; align-items: center; gap: 6px; }
+    .doc-meta .icon { width: 14px; height: 14px; stroke-width: 2; }
+    .content h1, .content h2, .content h3, .content h4 {
+      color: var(--text);
+      line-height: 1.3;
+      letter-spacing: -0.01em;
+      scroll-margin-top: 80px;
+      text-wrap: balance;
+    }
+    .content h2 {
+      font-size: 26px;
+      font-weight: 600;
+      margin: 56px 0 16px;
+      padding-top: 8px;
+      position: relative;
+    }
+    .content h3 {
+      font-size: 19px;
+      font-weight: 600;
+      margin: 36px 0 12px;
+      position: relative;
+    }
+    .content h4 {
+      font-size: 13px;
+      font-weight: 600;
+      margin: 24px 0 8px;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+    .content > p,
+    .content > ul,
+    .content > ol,
+    .content > blockquote { max-width: 75ch; }
+    .content p { margin: 0 0 16px; text-wrap: pretty; overflow-wrap: anywhere; }
+    .content a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-border); }
+    .content ul, .content ol { padding-left: 24px; margin: 0 0 16px; }
+    .content li { margin: 4px 0; }
+    .content strong { color: var(--text); font-weight: 600; }
+    .content em { color: var(--text-muted); }
+    .content hr { border: none; border-top: 1px solid var(--border); margin: 40px 0; }
+    .anchor {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 24px; height: 24px;
+      margin-left: 6px;
+      color: var(--text-subtle);
+      opacity: 0;
+      transform: translateY(-1px);
+      transition: opacity 0.15s, color 0.15s;
+      border-bottom: none !important;
+      border-radius: var(--radius-sm);
+    }
+    .anchor .icon { width: 14px; height: 14px; stroke-width: 2; }
+    .content img {
+      max-width: 100%;
+      height: auto;
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+      margin: 20px 0;
+      display: block;
+    }
+    .content figure { margin: 20px 0; }
+    .content figure img { margin: 0; }
+    .content figcaption {
+      font-size: 13px;
+      color: var(--text-subtle);
+      margin-top: 8px;
+      text-align: center;
+    }
+    .content .task-list-item { list-style: none; margin-left: -22px; }
+    .content .task-list-item-checkbox {
+      margin-right: 8px;
+      vertical-align: -2px;
+      accent-color: var(--accent);
+    }
+    .content .footnote-ref a,
+    .content sup a {
+      font-size: 0.75em;
+      vertical-align: super;
+      border-bottom: none;
+      padding: 0 2px;
+    }
+    .content .footnotes {
+      margin-top: 56px;
+      padding-top: 20px;
+      border-top: 1px solid var(--border);
+      font-size: 14px;
+      color: var(--text-muted);
+    }
+    .content code {
+      font-family: var(--font-mono);
+      background: var(--code-bg);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 0.88em;
+      color: var(--code-text);
+      border: 1px solid var(--border);
+      overflow-wrap: anywhere;
+    }
+    .content pre {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px 20px;
+      overflow-x: auto;
+      font-size: 13.5px;
+      line-height: 1.6;
+      margin: 16px 0;
+      position: relative;
+    }
+    .content pre code {
+      background: none; padding: 0; border: none;
+      color: var(--code-text);
+      font-size: inherit;
+    }
+    .copy-btn {
+      position: absolute;
+      top: 8px; right: 8px;
+      width: 32px; height: 32px;
+      display: inline-flex; align-items: center; justify-content: center;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      color: var(--text-subtle);
+      opacity: 0;
+      transition: opacity 0.15s, color 0.15s, border-color 0.15s;
+      padding: 0;
+    }
+    .copy-btn .icon { width: 14px; height: 14px; stroke-width: 2; }
+    .copy-btn.copied { color: var(--success); border-color: var(--success-border); opacity: 1; }
+    .timeline {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin: 24px 0;
+      position: relative;
+    }
+    .timeline::before {
+      content: "";
+      position: absolute;
+      left: 19px;
+      top: 20px;
+      bottom: 20px;
+      width: 2px;
+      background: linear-gradient(180deg, var(--accent-border), var(--border));
+    }
+    .step {
+      display: grid;
+      grid-template-columns: 40px 1fr;
+      gap: 16px;
+      align-items: start;
+      padding: 16px 4px;
+      position: relative;
+      border-radius: var(--radius);
+      transition: background-color 0.15s;
+    }
+    .step-num {
+      width: 40px; height: 40px;
+      display: inline-flex; align-items: center; justify-content: center;
+      background: var(--surface);
+      border: 2px solid var(--accent);
+      color: var(--accent);
+      border-radius: 50%;
+      font-weight: 600;
+      font-size: 14px;
+      flex-shrink: 0;
+      box-shadow: var(--shadow-sm);
+      position: relative;
+      z-index: 1;
+      transition: background-color 0.15s, color 0.15s, transform 0.15s;
+    }
+    .step.done .step-num { background: var(--accent); color: #fff; }
+    .step-body { padding-top: 6px; min-width: 0; }
+    .step-body h3 {
+      margin: 0 0 6px;
+      font-size: 16px;
+      font-weight: 600;
+    }
+    .step-body p { margin: 0 0 8px; color: var(--text-muted); font-size: 14.5px; max-width: 75ch; }
+    .step-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+    .tag {
+      display: inline-block;
+      padding: 2px 8px;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      font-size: 11.5px;
+      color: var(--text-muted);
+      font-family: var(--font-mono);
+    }
+    .callout {
+      display: grid;
+      grid-template-columns: 24px 1fr;
+      gap: 14px;
+      padding: 14px 18px;
+      border-radius: var(--radius);
+      border: 1px solid;
+      margin: 20px 0;
+      font-size: 14.5px;
+      line-height: 1.6;
+      max-width: 75ch;
+    }
+    .callout-icon { width: 20px; height: 20px; margin-top: 2px; stroke-width: 2; }
+    .callout-body { min-width: 0; }
+    .callout-title { font-weight: 600; margin: 0 0 4px; font-size: 14px; }
+    .callout-body p:last-child { margin-bottom: 0; }
+    .callout-body code { background: rgba(0,0,0,0.04); }
+    [data-theme="dark"] .callout-body code { background: rgba(255,255,255,0.06); }
+    .callout-info     { background: var(--info-soft);     border-color: var(--info-border);     color: var(--text); }
+    .callout-info     .callout-title, .callout-info     .callout-icon { color: var(--info); }
+    .callout-warn     { background: var(--warn-soft);     border-color: var(--warn-border);     color: var(--text); }
+    .callout-warn     .callout-title, .callout-warn     .callout-icon { color: var(--warn); }
+    .callout-danger   { background: var(--danger-soft);   border-color: var(--danger-border);   color: var(--text); }
+    .callout-danger   .callout-title, .callout-danger   .callout-icon { color: var(--danger); }
+    .callout-success  { background: var(--success-soft);  border-color: var(--success-border);  color: var(--text); }
+    .callout-success  .callout-title, .callout-success  .callout-icon { color: var(--success); }
+    .callout-decision { background: var(--decision-soft); border-color: var(--decision-border); color: var(--text); }
+    .callout-decision .callout-title, .callout-decision .callout-icon { color: var(--decision); }
+    .callout-tip      { background: var(--accent-soft);   border-color: var(--accent-border);   color: var(--text); }
+    .callout-tip      .callout-title, .callout-tip      .callout-icon { color: var(--accent-strong); }
+    .highlight {
+      background: linear-gradient(135deg, var(--accent-soft), var(--surface-2));
+      border-left: 4px solid var(--accent);
+      padding: 18px 22px;
+      border-radius: 0 var(--radius) var(--radius) 0;
+      margin: 24px 0;
+      font-size: 16px;
+      line-height: 1.65;
+      max-width: 75ch;
+    }
+    .highlight-label {
+      display: inline-block;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--accent-strong);
+      margin-bottom: 6px;
+    }
+    .diagram {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 24px;
+      margin: 24px 0;
+      box-shadow: var(--shadow-sm);
+      overflow-x: auto;
+    }
+    .diagram-caption {
+      margin-top: 12px;
+      padding-top: 12px;
+      border-top: 1px dashed var(--border);
+      font-size: 13px;
+      color: var(--text-subtle);
+      text-align: center;
+    }
+    .mermaid { text-align: center; min-height: 80px; }
+    .mermaid svg { max-width: 100%; height: auto; }
+    .mermaid:not([data-processed]) {
+      opacity: 0.4;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--text-subtle);
+      white-space: pre-wrap;
+      text-align: left;
+    }
+    .proscons {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      margin: 24px 0;
+    }
+    .proscons-col {
+      padding: 16px 20px;
+      border-radius: var(--radius);
+      border: 1px solid;
+    }
+    .proscons-col h4 {
+      margin: 0 0 12px;
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .proscons-col ul { margin: 0; padding-left: 18px; }
+    .proscons-col li { margin: 6px 0; }
+    .pros { background: var(--success-soft); border-color: var(--success-border); }
+    .pros h4 { color: var(--success); }
+    .cons { background: var(--danger-soft); border-color: var(--danger-border); }
+    .cons h4 { color: var(--danger); }
+    .compare {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 14px;
+      margin: 24px 0;
+    }
+    .compare-card {
+      padding: 18px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      transition: border-color 0.18s, box-shadow 0.18s;
+      position: relative;
+    }
+    .compare-card.recommended { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+    .compare-card.recommended::before {
+      content: var(--rec-label, "★ Recommended");
+      position: absolute; top: -10px; right: 14px;
+      background: var(--accent); color: #fff;
+      padding: 2px 10px; border-radius: 999px;
+      font-size: 11px; font-weight: 600;
+    }
+    .compare-card h4 { margin: 0 0 8px; font-size: 15px; color: var(--text); text-transform: none; letter-spacing: normal; }
+    .compare-card p { margin: 0; color: var(--text-muted); font-size: 14px; }
+    details.collapsible {
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      margin: 16px 0;
+      background: var(--surface);
+      overflow: hidden;
+    }
+    details.collapsible[open] { box-shadow: var(--shadow-sm); }
+    details.collapsible > summary {
+      cursor: pointer;
+      padding: 14px 18px;
+      font-weight: 500;
+      color: var(--text);
+      list-style: none;
+      display: flex; align-items: center; gap: 10px;
+      user-select: none;
+      transition: background 0.15s;
+      min-height: 44px;
+    }
+    details.collapsible > summary::-webkit-details-marker { display: none; }
+    details.collapsible > summary::before {
+      content: "›";
+      display: inline-block;
+      transition: transform 0.18s;
+      color: var(--accent);
+      font-size: 18px;
+      font-weight: 700;
+    }
+    details.collapsible[open] > summary::before { transform: rotate(90deg); }
+    .collapsible-body { padding: 4px 18px 18px; border-top: 1px solid var(--border); }
+    .collapsible-body > *:first-child { margin-top: 12px; }
+    .table-wrap {
+      overflow-x: auto;
+      margin: 20px 0;
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+      max-width: 100%;
+    }
+    .content table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+      background: var(--surface);
+      margin: 0;
+    }
+    .content > table {
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+      margin: 20px 0;
+      display: block;
+      overflow-x: auto;
+    }
+    .content th {
+      background: var(--surface-2);
+      color: var(--text);
+      font-weight: 600;
+      text-align: left;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--border);
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      white-space: nowrap;
+    }
+    .content td {
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--border);
+      color: var(--text-muted);
+      vertical-align: top;
+    }
+    .content tr:last-child td { border-bottom: none; }
+    .content blockquote {
+      margin: 20px 0;
+      padding: 4px 20px;
+      border-left: 3px solid var(--accent-border);
+      color: var(--text-muted);
+      font-style: italic;
+    }
+    .doc-footer {
+      margin-top: 80px;
+      padding-top: 24px;
+      border-top: 1px solid var(--border);
+      font-size: 13px;
+      color: var(--text-subtle);
+      display: flex;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+    .doc-footer a { color: var(--accent); text-decoration: none; }
+    *:focus { outline: none; }
+    *:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 3px;
+      border-radius: var(--radius-sm);
+    }
+    .toc-nav a:focus-visible { outline-offset: -2px; }
+    .icon-btn:focus-visible { outline-offset: 2px; }
+    .anchor:focus-visible { opacity: 1; outline-offset: 2px; }
+    details.collapsible > summary:focus-visible { outline-offset: -2px; }
+    @media (hover: hover) {
+      .icon-btn:hover { color: var(--accent); border-color: var(--accent-border); background: var(--accent-soft); }
+      .toc-nav a:hover { color: var(--accent); background: var(--accent-soft); }
+      .content a:hover { color: var(--accent-hover); border-bottom-color: var(--accent); }
+      .compare-card:hover { border-color: var(--accent-border); box-shadow: var(--shadow); }
+      .compare-card.recommended:hover { border-color: var(--accent); }
+      .content tr:hover td { background: var(--surface-2); }
+      details.collapsible > summary:hover { background: var(--surface-2); }
+      .step:hover { background: var(--surface-2); }
+      .step:hover .step-num { transform: scale(1.05); }
+      .anchor:hover { color: var(--accent); }
+      .content h2:hover .anchor,
+      .content h3:hover .anchor { opacity: 1; }
+      .copy-btn:hover { color: var(--accent); border-color: var(--accent-border); }
+      .content pre:hover .copy-btn { opacity: 1; }
+    }
+    @media (hover: none) {
+      .copy-btn { opacity: 0.6; }
+      .anchor { opacity: 0.4; }
+    }
+    @media (max-width: 900px) {
+      .layout {
+        grid-template-columns: 1fr;
+        gap: 16px;
+        padding: 20px 16px 80px;
+      }
+      .topbar-inner { padding: 8px 12px; }
+      .doc-header { margin-bottom: 28px; padding-bottom: 20px; }
+      .toc-mobile-trigger { display: inline-flex !important; }
+      .toc {
+        position: fixed;
+        top: 0; left: 0;
+        width: min(300px, 82vw);
+        height: 100dvh;
+        max-height: 100dvh;
+        background: var(--surface);
+        z-index: var(--z-drawer);
+        padding: 16px 8px 24px 16px;
+        box-shadow: var(--shadow-lg);
+        transform: translateX(-105%);
+        transition: transform 0.25s ease;
+      }
+      .toc-head { padding: 4px 4px 12px 8px; }
+      .toc-close {
+        display: inline-flex !important;
+        width: 36px; height: 36px;
+        align-items: center; justify-content: center;
+        background: transparent;
+        border: 1px solid transparent;
+        border-radius: var(--radius-sm);
+        color: var(--text-muted);
+        cursor: pointer;
+        padding: 0;
+      }
+      .toc-close .icon { width: 18px; height: 18px; stroke-width: 2; }
+      body.toc-open .toc { transform: translateX(0); }
+      body.toc-open .toc-backdrop {
+        display: block;
+        opacity: 1;
+      }
+      .toc-backdrop {
+        display: block;
+        opacity: 0;
+        pointer-events: none;
+      }
+      body.toc-open .toc-backdrop { pointer-events: auto; }
+      body.toc-open { overflow: hidden; }
+    }
+    @media (min-width: 901px) {
+      .toc-mobile-trigger { display: none !important; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        scroll-behavior: auto !important;
+      }
+      html { scroll-behavior: auto; }
+      .brand-dot { animation: none; box-shadow: 0 0 0 4px var(--accent-soft); }
+    }
+    @media print {
+      .topbar, .toc, .toc-backdrop, .icon-btn, .copy-btn, .anchor, .scroll-progress { display: none !important; }
+      .layout { grid-template-columns: 1fr; padding: 0; max-width: 100%; }
+      body { background: #fff; color: #000; }
+      a { color: #000; }
+      .content pre, .callout, .compare-card, .step, .diagram { break-inside: avoid; }
+      .doc-footer { break-before: avoid; }
+    }
+  </style>
+</head>
+<body>
+  <a href="#main" class="skip-link">跳至内容</a>
+  <div class="scroll-progress" id="scroll-progress" aria-hidden="true"></div>
+  <svg class="icon-sprite" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <symbol id="i-info" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></symbol>
+    <symbol id="i-warn" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></symbol>
+    <symbol id="i-danger" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></symbol>
+    <symbol id="i-success" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></symbol>
+    <symbol id="i-decision" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></symbol>
+    <symbol id="i-tip" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6"/><path d="M10 22h4"/><path d="M15.09 14a5 5 0 1 0-6.18 0 4 4 0 0 1 1.59 2h2.99a4 4 0 0 1 1.6-2Z"/></symbol>
+    <symbol id="i-lock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></symbol>
+    <symbol id="i-printer" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></symbol>
+    <symbol id="i-menu" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" x2="20" y1="6" y2="6"/><line x1="4" x2="20" y1="12" y2="12"/><line x1="4" x2="20" y1="18" y2="18"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/></symbol>
+    <symbol id="i-calendar" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="4" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></symbol>
+    <symbol id="i-link" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></symbol>
+  </svg>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <button class="icon-btn toc-mobile-trigger" id="toc-toggle" onclick="openToc()" aria-label="目录" title="目录">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-menu"/></svg>
+        </button>
+        <span class="brand-dot" aria-hidden="true"></span>
+        <span>笔记</span>
+      </div>
+      <div class="topbar-actions">
+        <button class="icon-btn" onclick="window.print()" title="打印 / 保存 PDF" aria-label="打印 / 保存 PDF">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-printer"/></svg>
+        </button>
+        <button class="icon-btn" id="theme-toggle" onclick="toggleTheme()" title="切换主题" aria-label="切换主题">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use id="theme-icon-use" href="#i-moon"/></svg>
+        </button>
+      </div>
+    </div>
+  </header>
+  <div class="toc-backdrop" onclick="closeToc()" aria-hidden="true"></div>
+  <div class="layout">
+    <aside class="toc" id="toc" aria-label="目录">
+      <div class="toc-head">
+        <p class="toc-title">目录</p>
+        <button class="toc-close" onclick="closeToc()" aria-label="关闭">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-x"/></svg>
+        </button>
+      </div>
+      <nav class="toc-nav" id="toc-nav">
+        <a href="#overview" class="lvl-2">扩展分类总览</a>
+        <a href="#appearance" class="lvl-2">外观 (Appearance)</a>
+        <a href="#hide-thinking" class="lvl-3">默认隐藏 Thinking</a>
+        <a href="#suppress-thinking" class="lvl-3">抑制 Thinking 状态文本</a>
+        <a href="#status-line" class="lvl-3">状态栏 Widget</a>
+        <a href="#tool-display" class="lvl-3">工具展示优化</a>
+        <a href="#feature" class="lvl-2">功能 (Feature)</a>
+        <a href="#ask-user" class="lvl-3">AskUserQuestions 工具</a>
+        <a href="#clear-cmd" class="lvl-3">Clear 命令</a>
+        <a href="#form-filling" class="lvl-3">FormFilling 工具</a>
+        <a href="#retry-policy" class="lvl-3">自动重试策略</a>
+        <a href="#skill-dollar" class="lvl-3">Skill 美元符引用</a>
+        <a href="#stats" class="lvl-3">会话统计</a>
+        <a href="#pi-rewind" class="lvl-3">pi-rewind</a>
+        <a href="#pi-rtk" class="lvl-3">pi-rtk-optimizer</a>
+        <a href="#pi-subagents" class="lvl-3">pi-subagents</a>
+        <a href="#permission" class="lvl-2">权限 (Permission)</a>
+        <a href="#perm-gate" class="lvl-3">权限守卫</a>
+        <a href="#sensitive-gate" class="lvl-3">敏感文件审批</a>
+        <a href="#prompt" class="lvl-2">提示 (Prompt)</a>
+        <a href="#system-prompt" class="lvl-3">系统提示注入</a>
+        <a href="#provider" class="lvl-2">供应商 (Provider)</a>
+        <a href="#relations" class="lvl-2">架构关系</a>
+      </nav>
+    </aside>
+    <main class="content" id="main">
+      <header class="doc-header">
+        <span class="doc-eyebrow">NOTES</span>
+        <h1 class="doc-title">Pi Agent 扩展体系</h1>
+        <p class="doc-subtitle">外观、功能、权限、提示、供应商五大类共 18 项自定义扩展模块的完整介绍，覆盖 TUI 交互、AI 工具增强、安全管控、模型接入等维度。</p>
+        <div class="doc-meta">
+          <span class="doc-meta-item">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-file"/></svg>
+            pi-extensions-guide.md
+          </span>
+          <span class="doc-meta-item">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-calendar"/></svg>
+            2026-05-23
+          </span>
+          <span class="doc-meta-item">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-clock"/></svg>
+            ~8 分钟阅读
+          </span>
+        </div>
+      </header>
+
+      <!-- CONTENT_START -->
+
+<h2 id="overview">扩展分类总览</h2>
+
+<p>整个扩展集合围绕 Pi coding agent 的 <code>ExtensionAPI</code> 构建，通过 <code>pi.on()</code> 监听生命周期事件、<code>pi.registerTool()</code> 注册自定义工具、<code>pi.registerCommand()</code> 注册命令、<code>pi.registerProvider()</code> 注册模型供应商，覆盖了 TUI 交互、AI 工具增强、安全管控、模型接入等维度。</p>
+
+<div class="compare">
+  <div class="compare-card recommended">
+    <h4>外观 (Appearance)</h4>
+    <p>Thinking 块显示策略、状态栏信息、工具调用展现形式。共 4 项子模块。</p>
+  </div>
+  <div class="compare-card">
+    <h4>功能 (Feature)</h4>
+    <p>自定义工具、命令、工作流自动化。共 9 项子模块，是整个扩展集中占比最大的分类。</p>
+  </div>
+  <div class="compare-card">
+    <h4>权限 (Permission)</h4>
+    <p>危险命令拦截、敏感文件访问审批。共 2 项子模块，共享同一覆盖层组件。</p>
+  </div>
+  <div class="compare-card">
+    <h4>提示 (Prompt)</h4>
+    <p>系统提示注入，在每次 AI 响应前追加自定义指令。1 项子模块。</p>
+  </div>
+  <div class="compare-card">
+    <h4>供应商 (Provider)</h4>
+    <p>自定义模型供应商接入，通过 Anthropic Messages API 兼容端点。共 6 项子模块（含 1 个公共工具模块）。</p>
+  </div>
+</div>
+
+<h2 id="appearance">外观 (Appearance)</h2>
+
+<p>该分类控制终端 UI 的呈现方式：thinking 块的默认显示策略、状态栏信息、工具调用的展现形式。</p>
+
+<h3 id="hide-thinking">默认隐藏 Thinking</h3>
+
+<p>将 thinking 内容默认折叠隐藏，在消息底部显示思考时长和 <code>Ctrl+T</code> 切换提示。通过 patch <code>AssistantMessageComponent</code> 的渲染逻辑，在隐藏态显示 thinking 文本尾部预览（最多 3 行），展开态完整显示。</p>
+
+<p>思考时长以小时、分钟、秒格式实时更新并持久化到 session 分支中，确保跨轮次、跨会话恢复时仍能正确显示。扩展同时自动写入 <code>settings.json</code> 和清理默认快捷键绑定。</p>
+
+<h3 id="suppress-thinking">抑制 Thinking 状态文本</h3>
+
+<p>屏蔽 <code>Ctrl+T</code> 切换 thinking 可见性时产生的 <code>"Thinking blocks: ..."</code> 状态行信息，避免与其他扩展的状态栏内容产生视觉干扰。通过 monkey-patch <code>InteractiveMode.prototype.showStatus</code> 实现。</p>
+
+<h3 id="status-line">状态栏 Widget</h3>
+
+<p>在编辑器上方渲染两行终端状态栏和快捷键提示面板：</p>
+
+<ul>
+  <li><strong>第一行</strong>：模型名称、上下文使用百分比进度条、输入/输出 Token 统计、累计费用</li>
+  <li><strong>第二行</strong>：当前目录、实时 TPS、Git 分支与变更状态</li>
+  <li><strong>快捷键面板</strong>：<code>Ctrl+O</code> 切换工具展开、<code>Ctrl+T</code> 切换 thinking、<code>Ctrl+Y</code> 切换 yolo 模式</li>
+  <li><strong>工作计时器</strong>：当前轮次耗时和会话累计耗时，数据持久化到 session 分支</li>
+</ul>
+
+<h3 id="tool-display">工具展示优化</h3>
+
+<p>OpenCode 风格的工具调用渲染扩展，提供三种预设（<code>opencode</code> / <code>balanced</code> / <code>verbose</code>），核心能力包括：</p>
+
+<ul>
+  <li>内置工具的紧凑渲染（<code>read</code>/<code>grep</code>/<code>find</code>/<code>ls</code>/<code>bash</code>/<code>edit</code>/<code>write</code>）</li>
+  <li>编辑/写入操作的自适应 diff 展示（split/unified 布局，语法高亮，窄窗宽度截断）</li>
+  <li>流式传输中的待定编辑/写入预览（展示 pending edit / pending overwrite / pending create 差异）</li>
+  <li>thinking 块标签与上下文净化，防止 presentation label 回流到后续模型轮次</li>
+  <li>可选的 native 用户消息框（markdown 感知渲染与 ANSI 安全处理）</li>
+</ul>
+
+<h2 id="feature">功能 (Feature)</h2>
+
+<p>该分类是扩展集中占比最大的部分，提供自定义工具、命令、工作流自动化等能力。</p>
+<h3 id="ask-user">AskUserQuestions 工具</h3>
+
+<p>通过自定义 TUI 对话框向用户提出 1-5 个带选项的问题。每个问题支持选择预设选项、输入自定义答案、或标记为"聊天讨论"。对话框支持键盘导航（方向键切换问题和选项、Enter 确认、Ctrl+C 取消），结果以结构化 JSON 返回给模型。工具执行期间自动暂停状态栏计时器。</p>
+
+<aside class="callout callout-tip">
+  <svg class="callout-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-tip"/></svg>
+  <div class="callout-body">
+    <p class="callout-title">选项 ID 设计原则</p>
+    <p>选项 ID 需要稳定且具描述性，因为选中后会原样返回给模型而非返回标签文本。</p>
+  </div>
+</aside>
+
+<h3 id="clear-cmd">Clear 命令</h3>
+
+<p>注册 <code>/clear</code> 命令，功能等同于 <code>/new</code>，清空当前上下文并开启新会话。</p>
+
+<h3 id="form-filling">FormFilling 工具</h3>
+
+<p>结构化表单填写工具，支持 2-25 个元素，字段类型包括布尔值、单选、多选、文本输入、说明文本。表单支持键盘导航、输入框支持多行文本（Shift+Enter 换行）、必填校验，提交时返回结构化 <code>FormValue</code> 数组。</p>
+
+<p>字段类型覆盖 <code>boolean</code>（是/否单选）、<code>select</code>（单选下拉）、<code>multiselect</code>（多选勾选）、<code>input</code>（自由文本输入）和 <code>text</code>（只读说明文本）。</p>
+
+<h3 id="retry-policy">自动重试策略</h3>
+
+<p>在每次 session 启动时自动写入 <code>settings.json</code>：请求重试设为最多 10 次、基础间隔 1 秒，provider 级别最大重试等待 5 分钟。通过确保 <code>/reload</code> 后策略生效来保持与 Pi 内存设置的同步。</p>
+
+<h3 id="skill-dollar">Skill 美元符引用</h3>
+
+<p>扩展编辑器的自动补全系统，支持 <code>$skill:name</code> 语法引用技能。自定义 <code>AutocompleteProvider</code> 拦截 <code>$</code> 前缀输入，从已注册的技能命令中模糊匹配并补齐。同时注册 <code>DollarSkillEditor</code> 拦截退格键：删除 <code>$skill:xxx</code> 引用时一次退格删除整个引用标记而非逐字符删除。</p>
+
+<p>在 <code>agent_start</code> 前扫描 prompt 中的 <code>$skill:xxx</code> 引用，将其映射为技能文件路径并注入到模型上下文，实现技能文件内容的按需加载。</p>
+
+<h3 id="stats">会话统计</h3>
+
+<p>注册 <code>/stats</code> 和 <code>/stat</code> 命令，加载当前设备上所有历史 session 数据，以交互式全屏覆盖层展示：</p>
+
+<ul>
+  <li><strong>概览页</strong>：Token 用量（输入/输出/缓存读写）、消息数、按费用排序的模型统计、高频工具调用排行</li>
+  <li><strong>热力图页</strong>：7 天范围显示日期与小时热力图，30 天/全部范围显示星期与月热力图</li>
+  <li><strong>每日趋势图</strong>：按日期展示 token 消耗的条形趋势</li>
+</ul>
+
+<p>支持 <code>r</code> 键切换时间范围（ALL TIME / 7D / 30D），方向键翻页。</p>
+<h3 id="pi-rewind">pi-rewind</h3>
+
+<p>基于 Git 的 checkpoint/rewind 扩展，每次执行 write/edit/bash 工具后自动创建快照。核心能力：</p>
+
+<ul>
+  <li><code>/rewind</code> 命令：checkpoint 浏览器、diff 预览、恢复三步流程</li>
+  <li><code>Esc+Esc</code> 快捷键：快速仅文件回退</li>
+  <li><strong>智能去重</strong>：只读操作（ls/find/cat）不创建 checkpoint</li>
+  <li><strong>恢复选项</strong>：文件与对话同时恢复、仅文件、仅对话</li>
+  <li><strong>安全边界</strong>：跨分支恢复拦截、敏感目录排除、50 个上限自动修剪</li>
+  <li><strong>底部状态栏</strong>：显示当前 session 的 checkpoint 数量</li>
+</ul>
+
+<aside class="callout callout-info">
+  <svg class="callout-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-info"/></svg>
+  <div class="callout-body">
+    <p class="callout-title">性能数据</p>
+    <p>在 182K 文件、87GB 的大型 monorepo 上，每次 createCheckpoint 耗时约 142ms，负载几乎不可感知。旧 session 在启动时自动清理。</p>
+  </div>
+</aside>
+
+<h3 id="pi-rtk">pi-rtk-optimizer</h3>
+
+<p>RTK 命令改写与工具输出压缩扩展，两阶段流水线：</p>
+
+<ul>
+  <li><strong>命令改写</strong>：将 bash 命令自动转为 <code>rtk</code> 等效命令，委托给安装的 <code>rtk rewrite</code> 二进制作为改写规则唯一来源，避免扩展侧维护重复规则</li>
+  <li><strong>输出压缩</strong>：ANSI 剥离、测试输出聚合、构建输出过滤、Git 输出压缩、Linter 聚合、搜索结果分组、源码注释过滤、智能截断。支持通过 <code>/rtk</code> 交互式设置面板按工具类型开关各压缩阶段</li>
+</ul>
+
+<p>提供子命令：<code>/rtk show</code>（当前配置）、<code>/rtk verify</code>（rtk 可用性检查）、<code>/rtk stats</code>（压缩指标）、<code>/rtk reset</code>（恢复默认）。</p>
+
+<h3 id="pi-subagents">pi-subagents</h3>
+
+<p>Claude Code 风格的自主子代理系统，提供 <code>Agent</code> / <code>get_subagent_result</code> / <code>steer_subagent</code> 三个工具。核心能力：</p>
+
+<ul>
+  <li><strong>默认代理类型</strong>：general-purpose（继承父 system prompt 的"父级孪生"）、Explore（只读代码探索，使用 haiku）、Plan（架构规划，只读）</li>
+  <li><strong>自定义代理</strong>：通过 <code>.pi/agents/name.md</code> 定义，YAML frontmatter 配置：工具集、模型、思考级别、隔离模式、轮次上限、记忆范围</li>
+  <li><strong>并行后台代理</strong>：并发队列默认 4，超出自动排队，前台代理绕过队列</li>
+  <li><strong>持久化 Widget</strong>：展示活动代理的 spinner、工具使用次数、token 消耗、上下文利用率百分比</li>
+  <li><strong>对话查看器</strong>：选择任意代理查看其完整对话的实时滚动输出</li>
+  <li><strong>优雅轮次限制</strong>：达到 max_turns 时发送 steering 消息要求收尾，额外 5 轮宽限期后才硬中断</li>
+  <li><strong>Git worktree 隔离</strong>：代理在隔离副本中运行，变更自动提交到分支</li>
+  <li><strong>跨扩展 RPC</strong>：其他扩展可通过 <code>pi.events</code> 事件总线 spawn/stop 子代理</li>
+  <li><strong>定时调度</strong>：支持 cron / interval / one-shot 三种调度模式，session 级别持久化</li>
+</ul>
+
+<h2 id="permission">权限 (Permission)</h2>
+
+<p>该分类提供安全管控能力：危险命令拦截、敏感文件访问审批。两个扩展共享同一个 <code>confirmOverlay</code> 覆盖层组件，该组件通过 patch <code>InteractiveMode.prototype.showExtensionCustom</code> 实现了 <code>aboveStatus</code> 放置模式，在状态行上方渲染自定义确认界面。</p>
+
+<h3 id="perm-gate">权限守卫</h3>
+
+<p>在 bash 工具执行前扫描命令，匹配 27 条危险规则，按严重程度（critical / high / medium）分级。规则覆盖：递归强制删除、sudo 提权、dd 磁盘覆写、mkfs 格式化、fdisk 分区修改、curl-pipe-shell、git 强制操作、Kubernetes 资源删除、敏感文件访问、系统关机重启等场景。</p>
+
+<p>检测到危险命令时弹出确认覆盖层，展示匹配的规则 ID、原因和完整命令，用户可选择允许或拒绝。支持 yolo 模式（<code>Ctrl+Y</code>）绕过所有检查。</p>
+
+<aside class="callout callout-warn">
+  <svg class="callout-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-warn"/></svg>
+  <div class="callout-body">
+    <p class="callout-title">注意</p>
+    <p>命令规范化时会对引用字符串做去内容处理（替换为 <code>''</code> 或 <code>""</code>），避免引号内的敏感路径片段触发误报。同时移除安全的 stderr 重定向（<code>2>/dev/null</code>）以降低误报率。</p>
+  </div>
+</aside>
+
+<h3 id="sensitive-gate">敏感文件审批</h3>
+
+<p>在 read/write/edit 工具执行前扫描文件路径，匹配 8 条敏感文件名规则：<code>.env</code> 环境变量文件、包含 secret/credential/token/key 的文件名、SSH 私钥（id_rsa/id_ecdsa 等）、云服务和包管理器认证文件（.npmrc/.pypirc/.netrc）、Shell 启动配置（.bashrc/.zshrc）。</p>
+
+<p>路径规范化处理将反斜杠转正斜杠并合并连续分隔符，确保跨平台一致匹配。同样支持 yolo 模式跳过检查。</p>
+
+<h2 id="prompt">提示 (Prompt)</h2>
+
+<h3 id="system-prompt">系统提示注入</h3>
+
+<p>在每次 <code>before_agent_start</code> 事件中向系统提示注入额外的指令块。当前注入的内容是一套生产级输出纪律规范，包括：</p>
+
+<ul>
+  <li>Banned Output Patterns 禁止列表（代码省略符、结构性捷径、描述代替实现）</li>
+  <li>输出净化纪律：禁止 Prompt Echoing、Process Leakage、Meta-commentary</li>
+  <li>动态技能激活评估流程（步骤 0 检索 → 步骤 1 评估 → 步骤 2 激活 → 步骤 3 实现）</li>
+  <li>执行原则、开发规范、Git Commit Message 格式、语言风格约束</li>
+</ul>
+
+<aside class="callout callout-info">
+  <svg class="callout-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-info"/></svg>
+  <div class="callout-body">
+    <p class="callout-title">注入方式</p>
+    <p>扩展通过 <code>return { systemPrompt: event.systemPrompt + "\n\n" + extraInstructions }</code> 在原始系统提示后追加，而非替换。扩展自身的代码中包含了完整的指令文本，修改指令只需编辑 <code>system-prompt.ts</code>。</p>
+  </div>
+</aside>
+<h2 id="provider">供应商 (Provider)</h2>
+
+<p>该分类注册了 5 个自定义模型供应商，均通过 Anthropic Messages API 兼容端点接入。公共工具模块 <code>env.ts</code> 提供统一的 API Key 读取工具：优先读取进程环境变量，回退到 <code>.env</code> 文件的解析结果。</p>
+
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr><th>供应商 ID</th><th>端点</th><th>提供模型</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>new-api-claude</code></td>
+      <td>内网 NewAPI 网关</td>
+      <td>Claude Opus 4.7 / 4.6 / Sonnet 4.6、DeepSeek V4 Pro / V4 Flash</td>
+    </tr>
+    <tr>
+      <td><code>new-api-codex</code></td>
+      <td>内网 NewAPI 网关</td>
+      <td>Codex 系列模型</td>
+    </tr>
+    <tr>
+      <td><code>new-api-openai</code></td>
+      <td>内网 NewAPI 网关</td>
+      <td>OpenAI 系列模型</td>
+    </tr>
+    <tr>
+      <td><code>personal-dpsk</code></td>
+      <td>api.deepseek.com/anthropic</td>
+      <td>DeepSeek V4 Pro（含推理）、V4 Flash</td>
+    </tr>
+    <tr>
+      <td><code>personal-mimo</code></td>
+      <td>token-plan-sgp.xiaomimimo.com</td>
+      <td>MiMo V2.5 Pro（100 万上下文窗口，支持文本和图片）</td>
+    </tr>
+    <tr>
+      <td><code>ikun</code></td>
+      <td>IKUN_BASE_URL</td>
+      <td>Claude Opus 4.7 / 4.6</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<h2 id="relations">架构关系</h2>
+
+<p>所有扩展通过各分类的 <code>index.ts</code> 统一导出，使用 <code>export default async function(pi: ExtensionAPI)</code> 签名注册到 Pi 框架。以下为扩展间的协作关系：</p>
+
+<div class="highlight">
+  <span class="highlight-label">要点</span>
+  <p>扩展间通过 <code>Symbol.for()</code> 定义共享状态键、<code>pi.events</code> 事件总线和 <code>pi.registerShortcut()</code> 快捷键体系实现松耦合协作，无需模块间的直接 import 依赖。</p>
+</div>
+
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr><th>协作关系</th><th>参与扩展</th><th>机制</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>计时器暂停/恢复</td>
+      <td>status-line、permission-gate、sensitive-file-gate、ask-user-questions、form-filling</td>
+      <td><code>pi.events</code> 事件 <code>status-line:timer-pause</code> / <code>status-line:timer-resume</code></td>
+    </tr>
+    <tr>
+      <td>Yolo 模式共享</td>
+      <td>status-line、permission-gate、sensitive-file-gate</td>
+      <td><code>Symbol.for("pi.extensions.yolo.active")</code> 全局标记</td>
+    </tr>
+    <tr>
+      <td>Thinking 切换同步</td>
+      <td>hide-thinking-default、status-line</td>
+      <td>ShortcutStateListener 机制监听 <code>Ctrl+T</code> 事件</td>
+    </tr>
+    <tr>
+      <td>技能引用与预加载</td>
+      <td>skill-dollar-reference、pi-subagents</td>
+      <td>从相同技能目录树发现 SKILL.md</td>
+    </tr>
+    <tr>
+      <td>覆盖层组件</td>
+      <td>confirmOverlay、form-ui-helpers</td>
+      <td>各自独立实现 <code>aboveStatus</code> placement，通过不同 Symbol 隔离</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<aside class="callout callout-tip">
+  <svg class="callout-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-tip"/></svg>
+  <div class="callout-body">
+    <p class="callout-title">扩展布局约定</p>
+    <p>每个分类的 <code>index.ts</code> 负责导入并串联所有子模块，子模块通过独立的 <code>export default function(pi)</code> 导出。通用工具模块（如 <code>form-ui-helpers.ts</code>、<code>env.ts</code>、<code>confirm-overlay.ts</code>）被同一分类下的多个子模块共享。npm 包类型的大扩展（pi-tool-display、pi-rewind、pi-rtk-optimizer、pi-subagents）在各自目录内维护独立的 <code>package.json</code> 和测试体系。</p>
+  </div>
+</aside>
+<!-- CONTENT_END -->
+
+      <footer class="doc-footer">
+        <span>Generated by <a href="#">md2html</a></span>
+        <span>来源: pi-extensions-guide.md</span>
+      </footer>
+    </main>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <script>
+    var STORAGE_KEY = "md2html-theme";
+    function currentTheme() { return document.documentElement.dataset.theme || "light"; }
+    function applyThemeIcon() {
+      var use = document.getElementById("theme-icon-use");
+      if (use) use.setAttribute("href", currentTheme() === "dark" ? "#i-sun" : "#i-moon");
+    }
+    (function restoreTheme() {
+      var saved = localStorage.getItem(STORAGE_KEY);
+      if (saved) document.documentElement.dataset.theme = saved;
+    })();
+    var diagramSources = new Map();
+    function initMermaid() {
+      var isDark = currentTheme() === "dark";
+      mermaid.initialize({
+        startOnLoad: false,
+        theme: isDark ? "dark" : "default",
+        themeVariables: {
+          primaryColor: isDark ? "#3A2A22" : "#FBEEE6",
+          primaryTextColor: isDark ? "#F5F0E8" : "#1A1A1A",
+          primaryBorderColor: isDark ? "#E89572" : "#D97757",
+          lineColor: isDark ? "#9A938A" : "#6B6B66",
+          secondaryColor: isDark ? "#2A2520" : "#F5F5F0",
+          tertiaryColor: isDark ? "#221E1A" : "#FFFFFF",
+          fontFamily: "Inter, system-ui, sans-serif",
+        },
+      });
+    }
+    async function renderMermaid() {
+      initMermaid();
+      var els = document.querySelectorAll(".mermaid");
+      els.forEach(function(el) {
+        if (!diagramSources.has(el)) diagramSources.set(el, el.textContent.trim());
+        el.textContent = diagramSources.get(el);
+        el.removeAttribute("data-processed");
+      });
+      try { await mermaid.run({ nodes: els }); } catch (e) { console.error(e); }
+    }
+    function toggleTheme() {
+      var next = currentTheme() === "light" ? "dark" : "light";
+      document.documentElement.dataset.theme = next;
+      localStorage.setItem(STORAGE_KEY, next);
+      applyThemeIcon();
+      renderMermaid();
+    }
+    function openToc()  { document.body.classList.add("toc-open"); }
+    function closeToc() { document.body.classList.remove("toc-open"); }
+    document.addEventListener("keydown", function(e) {
+      if (e.key === "Escape" && document.body.classList.contains("toc-open")) closeToc();
+    });
+    function setupTocSpy() {
+      var links = document.querySelectorAll("#toc-nav a[href^='#']");
+      if (!links.length) {
+        var toc = document.getElementById("toc");
+        if (toc) toc.style.display = "none";
+        return;
+      }
+      var map = new Map();
+      links.forEach(function(a) {
+        var id = a.getAttribute("href").slice(1);
+        var el = document.getElementById(id);
+        if (el) map.set(el, a);
+        a.addEventListener("click", function() {
+          if (window.matchMedia("(max-width: 900px)").matches) closeToc();
+        });
+      });
+      var obs = new IntersectionObserver(function(entries) {
+        entries.forEach(function(en) {
+          var link = map.get(en.target);
+          if (!link) return;
+          if (en.isIntersecting) {
+            links.forEach(function(l) { l.classList.remove("active"); });
+            link.classList.add("active");
+          }
+        });
+      }, { rootMargin: "-80px 0px -70% 0px", threshold: 0 });
+      map.forEach(function(_, el) { obs.observe(el); });
+    }
+    function injectAnchors() {
+      document.querySelectorAll(".content h2[id], .content h3[id]").forEach(function(h) {
+        if (h.querySelector(".anchor")) return;
+        var a = document.createElement("a");
+        a.className = "anchor";
+        a.href = "#" + h.id;
+        a.setAttribute("aria-label", "Permalink");
+        a.innerHTML = '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-link"/></svg>';
+        h.appendChild(a);
+      });
+    }
+    function injectCopyButtons() {
+      document.querySelectorAll(".content pre").forEach(function(pre) {
+        if (pre.classList.contains("mermaid")) return;
+        if (pre.querySelector(".copy-btn")) return;
+        var btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "copy-btn";
+        btn.setAttribute("aria-label", "Copy code");
+        btn.innerHTML = '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-copy"/></svg>';
+        btn.addEventListener("click", async function() {
+          var code = (pre.querySelector("code") ? pre.querySelector("code").textContent : pre.textContent) || "";
+          try {
+            await navigator.clipboard.writeText(code);
+            btn.classList.add("copied");
+            btn.innerHTML = '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-check"/></svg>';
+            setTimeout(function() {
+              btn.classList.remove("copied");
+              btn.innerHTML = '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-copy"/></svg>';
+            }, 1500);
+          } catch (e) { console.error(e); }
+        });
+        pre.appendChild(btn);
+      });
+    }
+    function setupScrollProgress() {
+      var bar = document.getElementById("scroll-progress");
+      if (!bar) return;
+      var onScroll = function() {
+        var h = document.documentElement.scrollHeight - document.documentElement.clientHeight;
+        var p = h > 0 ? (document.documentElement.scrollTop / h * 100) : 0;
+        bar.style.width = p + "%";
+      };
+      window.addEventListener("scroll", onScroll, { passive: true });
+      onScroll();
+    }
+    document.addEventListener("DOMContentLoaded", function() {
+      applyThemeIcon();
+      injectAnchors();
+      injectCopyButtons();
+      renderMermaid();
+      setupTocSpy();
+      setupScrollProgress();
+    });
+  </script>
+</body>
+</html>
