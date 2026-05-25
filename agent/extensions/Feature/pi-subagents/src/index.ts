@@ -600,7 +600,6 @@ export default function (pi: ExtensionAPI) {
     return name.replace(/-\d{8}$/, "");
   }
 
-  const typeListText = buildTypeListText();
 
   // Apply persisted settings on startup and emit `subagents:settings_loaded`.
   // Global + project merged; missing → defaults; corrupt file emits a warning
@@ -647,8 +646,7 @@ export default function (pi: ExtensionAPI) {
 
 The Agent tool launches specialized agents that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.
 
-Available agent types:
-${typeListText}
+Use list_agents to discover available agent types and their descriptions before spawning.
 
 Guidelines:
 - For parallel work, use run_in_background: true on each agent. Foreground calls run sequentially — only one executes at a time.
@@ -1324,6 +1322,21 @@ Guidelines:
       } catch (err) {
         return textResult(`Failed to steer agent: ${err instanceof Error ? err.message : String(err)}`);
       }
+    },
+  }));
+
+  // ---- list_agents tool ----
+
+  pi.registerTool(defineTool({
+    name: "list_agents",
+    label: "List Agents",
+    description:
+      "List all available sub-agent types with their descriptions, default models, and capabilities. " +
+      "Use this to discover what agent types are available before spawning with the Agent tool.",
+    parameters: Type.Object({}),
+    execute: async (_toolCallId, _params, _signal, _onUpdate, _ctx) => {
+      reloadCustomAgents();
+      return textResult(buildTypeListText());
     },
   }));
 

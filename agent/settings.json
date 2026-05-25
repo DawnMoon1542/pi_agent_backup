@@ -1,7 +1,7 @@
 {
   "lastChangelogVersion": "0.75.1",
-  "defaultProvider": "new-api-codex",
-  "defaultModel": "gpt-5.5",
+  "defaultProvider": "new-api-claude",
+  "defaultModel": "claude-opus-4-6",
   "defaultThinkingLevel": "high",
   "retry": {
     "enabled": true,
@@ -24,8 +24,10 @@
     "new-api-codex/gpt-5.5",
     "new-api-claude/deepseek-v4-flash",
     "new-api-claude/deepseek-v4-pro",
+    "new-api-claude/claude-opus-4-7",
+    "ikun/claude-opus-4-7",
     "new-api-claude/claude-sonnet-4-6",
-    "new-api-claude/claude-opus-4-7"
+    "ikun/claude-opus-4-6"
   ],
   "packages": []
 }
