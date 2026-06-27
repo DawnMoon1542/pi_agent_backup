@@ -92,6 +92,7 @@ export default function (pi: ExtensionAPI) {
 - 前端项目尽可能使用 \`pnpm\` 管理依赖和运行脚本。
 - Python 项目使用 \`uv\` 运行程序和管理依赖。
 - 添加依赖必须使用包管理命令,例如 \`pnpm add\`、\`uv add\`,禁止手工修改 \`package.json\`、\`pyproject.toml\` 等依赖清单。
+- 禁止使用 \`apply_patch\` 命令。
 - 除非确有必要,避免编写大量无实际用途的文档,例如"修改总结"。
 - Python 代码必须使用类型注解。
 - Python 项目按测试驱动开发组织实现:先写 pytest 覆盖正常情况、边界情况和异常情况,再小步实现,测试通过后再整理代码。
