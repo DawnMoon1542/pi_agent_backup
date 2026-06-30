@@ -6,7 +6,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   AssistantMessageComponent,
 } from "@earendil-works/pi-coding-agent";
-import { Markdown, Spacer, Text, wrapTextWithAnsi, visibleWidth, type Component } from "@earendil-works/pi-tui";
+import { Markdown, Spacer, Text, truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
 import { execSync } from "node:child_process";
 
 const MERMAID_PATCHED = Symbol.for("pi.extensions.mermaid-render.patched");
@@ -19,6 +19,8 @@ const MERMAID_FENCE_REGEX = /```mermaid\s*\n([\s\S]*?)```/g;
 const MAX_RENDER_CACHE_ENTRIES = 64;
 // termaid 默认使用圆角连线，保持省略 --sharp-edges 以固定圆角输出。
 const TERMAID_COMMAND = "termaid --padding-x 2 --padding-y 1 --gap 2";
+const WARNING_STYLE = "\x1b[38;2;255;244;204m\x1b[48;2;64;48;10m";
+const ANSI_RESET = "\x1b[0m";
 
 function getMermaidEnabled(): boolean {
   const store = globalThis as typeof globalThis & { [MERMAID_ENABLED]?: boolean };
@@ -106,33 +108,24 @@ function renderMermaidToTerminal(source: string): string | null {
 class TermaidOutput implements Component {
   private cachedWidth?: number;
   private cachedLines?: string[];
+  private readonly paddingX = 1;
+  private readonly rawLines: string[];
+  private readonly requiredWidth: number;
 
-  constructor(private rendered: string) {}
+  constructor(rendered: string) {
+    this.rawLines = rendered.split("\n");
+    const maxRenderedWidth = this.rawLines.reduce((max, line) => Math.max(max, visibleWidth(line)), 0);
+    this.requiredWidth = maxRenderedWidth + this.paddingX * 2;
+  }
 
   render(width: number): string[] {
     if (this.cachedLines && this.cachedWidth === width) {
       return this.cachedLines;
     }
 
-    const rawLines = this.rendered.split("\n");
-    const paddingX = 1;
-    const innerWidth = Math.max(1, width - paddingX * 2);
-    const leftMargin = " ".repeat(paddingX);
-
-    const lines: string[] = [];
-    for (const line of rawLines) {
-      const lineWidth = visibleWidth(line);
-      if (lineWidth <= innerWidth) {
-        const padding = Math.max(0, innerWidth - lineWidth);
-        lines.push(`${leftMargin}${line}${" ".repeat(padding)}${leftMargin}`);
-      } else {
-        const wrapped = wrapTextWithAnsi(line, innerWidth);
-        for (const w of wrapped) {
-          const wPadding = Math.max(0, innerWidth - visibleWidth(w));
-          lines.push(`${leftMargin}${w}${" ".repeat(wPadding)}${leftMargin}`);
-        }
-      }
-    }
+    const lines = width < this.requiredWidth
+      ? this.renderNarrowWarning(width)
+      : this.renderDiagram(width);
 
     this.cachedWidth = width;
     this.cachedLines = lines;
@@ -142,6 +135,30 @@ class TermaidOutput implements Component {
   invalidate(): void {
     this.cachedWidth = undefined;
     this.cachedLines = undefined;
+  }
+
+  private renderNarrowWarning(width: number): string[] {
+    return [
+      this.formatWarningLine("! Terminal is too narrow to display this Mermaid diagram", width),
+      this.formatWarningLine(`  Current width: ${width}, required width: ${this.requiredWidth}`, width),
+      this.formatWarningLine("  Use /termaid to disable rendering", width),
+    ];
+  }
+
+  private formatWarningLine(text: string, width: number): string {
+    const safeWidth = Math.max(1, width);
+    const truncated = truncateToWidth(text, safeWidth, "...");
+    const padding = Math.max(0, safeWidth - visibleWidth(truncated));
+    return `${WARNING_STYLE}${truncated}${" ".repeat(padding)}${ANSI_RESET}`;
+  }
+
+  private renderDiagram(width: number): string[] {
+    const innerWidth = Math.max(1, width - this.paddingX * 2);
+    const leftMargin = " ".repeat(this.paddingX);
+    return this.rawLines.map((line) => {
+      const padding = Math.max(0, innerWidth - visibleWidth(line));
+      return `${leftMargin}${line}${" ".repeat(padding)}${leftMargin}`;
+    });
   }
 }
 
@@ -263,7 +280,11 @@ function patchAssistantMessage(): void {
           contentContainer.addChild(new Markdown(content.text.trim(), 1, 0, this.markdownTheme));
         }
       } else if (content.type === "thinking" && typeof content.thinking === "string" && content.thinking.trim()) {
-        contentContainer.addChild(new Markdown(content.thinking.trim(), 1, 0, this.markdownTheme));
+        if (this.hideThinkingBlock) {
+          contentContainer.addChild(new Text(this.hiddenThinkingLabel ?? "Thinking...", 1, 0));
+        } else {
+          contentContainer.addChild(new Markdown(content.thinking.trim(), 1, 0, this.markdownTheme));
+        }
       }
 
       if (hasVisibleContentAfter && (content.type === "text" || content.type === "thinking")) {
