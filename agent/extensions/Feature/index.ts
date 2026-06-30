@@ -2,6 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import askUserQuestions from "./ask-user-questions";
 import clearCommand from "./clear-command";
+import dumpSession from "./dump-session";
 import formFilling from "./form-filling";
 import retryPolicy from "./retry-policy";
 import skillDollarReference from "./skill-dollar-reference";
@@ -13,6 +14,7 @@ import piSubagents from "./pi-subagents/src/index";
 export default async function (pi: ExtensionAPI) {
   await Promise.resolve(askUserQuestions(pi));
   await Promise.resolve(clearCommand(pi));
+  await Promise.resolve(dumpSession(pi));
   await Promise.resolve(formFilling(pi));
   await Promise.resolve(retryPolicy(pi));
   await Promise.resolve(skillDollarReference(pi));
