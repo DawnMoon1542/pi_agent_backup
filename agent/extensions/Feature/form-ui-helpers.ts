@@ -183,13 +183,59 @@ export function disabledButton(theme: UserToolTheme, focused: boolean, label: st
   return `${focusPrefix(theme, focused)}${styled}`;
 }
 
+const BRACKETED_PASTE_START = "\x1b[200~";
+const BRACKETED_PASTE_END = "\x1b[201~";
+const CSI_U_CTRL_KEY = /\x1b\[(\d+);5u/g;
+
+function isAllowedTextCharacter(char: string, allowLineBreaks: boolean): boolean {
+  if (allowLineBreaks && char === "\n") return true;
+  const code = char.charCodeAt(0);
+  return code >= 32 && code !== 127 && (code < 0x80 || code > 0x9f);
+}
+
+function normalizePastedText(text: string): string {
+  const decodedControls = text.replace(CSI_U_CTRL_KEY, (match, code) => {
+    const codepoint = Number(code);
+    if (codepoint >= 97 && codepoint <= 122) return String.fromCharCode(codepoint - 96);
+    if (codepoint >= 65 && codepoint <= 90) return String.fromCharCode(codepoint - 64);
+    return match;
+  });
+  const normalized = decodedControls.replace(/\r\n/g, "\n").replace(/\r/g, "\n").replace(/\t/g, "    ");
+  return Array.from(normalized).filter((char) => isAllowedTextCharacter(char, true)).join("");
+}
+
+function decodeBracketedPaste(data: string): string | undefined {
+  const startIndex = data.indexOf(BRACKETED_PASTE_START);
+  if (startIndex < 0) return undefined;
+
+  const contentStart = startIndex + BRACKETED_PASTE_START.length;
+  const endIndex = data.indexOf(BRACKETED_PASTE_END, contentStart);
+  if (endIndex < 0) return undefined;
+
+  return normalizePastedText(data.slice(contentStart, endIndex));
+}
+
+function isPlainTextChunk(data: string): boolean {
+  for (const char of data) {
+    const code = char.charCodeAt(0);
+    const allowedPasteControl = data.length > 1 && (char === "\n" || char === "\r" || char === "\t");
+    if (allowedPasteControl) continue;
+    if (code < 32 || code === 127 || (code >= 0x80 && code <= 0x9f)) return false;
+  }
+  return data.length > 0;
+}
+
 export function decodeTextInput(data: string): string | undefined {
   if (matchesKey(data, Key.space)) return " ";
+
+  const pasted = decodeBracketedPaste(data);
+  if (pasted !== undefined) return pasted;
+
   const decoded = decodeKittyPrintable(data);
   if (decoded !== undefined && decoded.length > 0) return decoded;
-  if (data.length === 1) {
-    const code = data.charCodeAt(0);
-    if (code >= 32 && code !== 127) return data;
+
+  if (isPlainTextChunk(data)) {
+    return data.length > 1 ? normalizePastedText(data) : data;
   }
   return undefined;
 }
