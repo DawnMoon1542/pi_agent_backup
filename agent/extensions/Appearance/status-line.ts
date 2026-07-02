@@ -3,6 +3,7 @@
 // @description: 彩色显示模型、上下文、TPS 和 git 状态
 
 import { InteractiveMode, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { truncateToWidth } from "@earendil-works/pi-tui";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -197,27 +198,8 @@ function formatTps(tps: number | undefined): string {
   return tps < 10 ? tps.toFixed(1) : Math.round(tps).toString();
 }
 
-function visibleWidth(s: string): number {
-  return s.replace(/\x1b\[[0-9;]*m/g, "").length;
-}
-
 function truncateAnsi(s: string, width: number): string {
-  if (width <= 0 || visibleWidth(s) <= width) return s;
-  let out = "";
-  let visible = 0;
-  for (let i = 0; i < s.length && visible < width - 1; i++) {
-    if (s[i] === "\x1b") {
-      const match = s.slice(i).match(/^\x1b\[[0-9;]*m/);
-      if (match) {
-        out += match[0];
-        i += match[0].length - 1;
-        continue;
-      }
-    }
-    out += s[i];
-    visible++;
-  }
-  return `${out}…${RESET}`;
+  return truncateToWidth(s, width, "", true);
 }
 
 export default function (pi: ExtensionAPI) {
