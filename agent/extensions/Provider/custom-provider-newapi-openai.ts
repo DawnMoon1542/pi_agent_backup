@@ -25,6 +25,15 @@ export default async function (pi: ExtensionAPI) {
         contextWindow: 1_048_576,
         maxTokens: 65_536,
       },
+      {
+        id: "grok-4.5",
+        name: "Grok 4.5",
+        reasoning: true,
+        input: ["text", "image"],
+        cost: { input: 2.0, output: 6.0, cacheRead: 0.5, cacheWrite: 2.0 },
+        contextWindow: 500_000,
+        maxTokens: 131_072,
+      }
     ],
   });
 }

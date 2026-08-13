@@ -5,3 +5,4 @@ agent/auth.json
 .DS_Store
 node_modules/
 dist/
+agent/extensions/pi-agent-manager/

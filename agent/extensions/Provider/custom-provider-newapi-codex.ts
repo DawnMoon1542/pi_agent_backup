@@ -16,6 +16,15 @@ export default async function (pi: ExtensionAPI) {
         contextWindow: 272_000,
         maxTokens: 128_000,
       },
+      {
+        id: "gpt-5.6-sol",
+        name: "GPT-5.6 Sol",
+        reasoning: true,
+        input: ["text", "image"],
+        cost: { input: 5.0, output: 30.0, cacheRead: 0.5, cacheWrite: 6.25 },
+        contextWindow: 1_050_000,
+        maxTokens: 128_000,
+      },
     ],
   });
 }

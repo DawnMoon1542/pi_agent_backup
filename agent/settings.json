@@ -1,7 +1,7 @@
 {
-  "lastChangelogVersion": "0.75.1",
+  "lastChangelogVersion": "0.84.1",
   "defaultProvider": "new-api-claude",
-  "defaultModel": "deepseek-v4-flash",
+  "defaultModel": "claude-opus-4-6",
   "defaultThinkingLevel": "high",
   "retry": {
     "enabled": true,
@@ -14,8 +14,6 @@
   },
   "hideThinkingBlock": true,
   "enabledModels": [
-    "openai-codex/gpt-5.5",
-    "openai-codex/gpt-5.4",
     "new-api-claude/claude-opus-4-6",
     "personal-mimo/mimo-v2.5-pro",
     "new-api-openai/gemini-3.1-pro-preview",
@@ -26,7 +24,19 @@
     "ikun/claude-opus-4-7",
     "new-api-claude/claude-sonnet-4-6",
     "ikun/claude-opus-4-6",
-    "new-api-openai/gemini-3.5-flash"
+    "new-api-openai/gemini-3.5-flash",
+    "new-api-claude/claude-opus-4-8",
+    "new-api-openai/grok-4.5",
+    "new-api-codex/gpt-5.6-sol"
   ],
-  "packages": []
+  "packages": [],
+  "theme": "dark",
+  "markdown": {
+    "mermaid": "streaming"
+  },
+  "terminal": {
+    "showTerminalProgress": false
+  },
+  "steeringMode": "one-at-a-time",
+  "tuiMode": "regular"
 }
