@@ -34,10 +34,6 @@ fi
 
 echo "==> Applying local patches..."
 
-# 包名替换
-find src -name "*.ts" -exec sed -i '' 's|@mariozechner/pi-coding-agent|@earendil-works/pi-coding-agent|g' {} \;
-find src -name "*.ts" -exec sed -i '' 's|@mariozechner/pi-tui|@earendil-works/pi-tui|g' {} \;
-
 # config 路径适配
 sed -i '' 's|"extensions", "pi-tool-display"|"extensions", "Appearance", "pi-tool-display"|g' src/config-store.ts
 

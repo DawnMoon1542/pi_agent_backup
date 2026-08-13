@@ -45,6 +45,8 @@ type PatchableAssistantMessagePrototype = {
   updateContent?: (message: any) => void;
 };
 
+type MarkdownTransformer = (markdown: string, context: { messageType: string; isStreaming: boolean; availableWidth: number }) => string;
+
 type PatchableAssistantMessageInstance = {
   contentContainer?: {
     clear(): void;
@@ -53,6 +55,8 @@ type PatchableAssistantMessageInstance = {
   hideThinkingBlock?: boolean;
   hiddenThinkingLabel?: string;
   markdownTheme?: any;
+  markdownTransformers?: readonly MarkdownTransformer[];
+  isStreaming?: boolean;
   lastMessage?: any;
   hasToolCalls?: boolean;
 };
@@ -287,6 +291,24 @@ function restoreThinkingDurations(ctx: Ctx): void {
   }
 }
 
+function buildMarkdownTransform(component: PatchableAssistantMessageInstance, messageType: string): ((markdown: string, availableWidth: number) => string) | undefined {
+  const transformers = component.markdownTransformers;
+  if (!transformers || transformers.length === 0) return undefined;
+  const isStreaming = Boolean(component.isStreaming);
+  return (markdown: string, availableWidth: number): string => {
+    let result = markdown;
+    for (const transformer of transformers) {
+      try {
+        const transformed = transformer(result, { messageType, isStreaming, availableWidth });
+        if (typeof transformed === "string") result = transformed;
+      } catch {
+        // Keep current result on transformer failure
+      }
+    }
+    return result;
+  };
+}
+
 function renderExpandedThinkingMessage(component: PatchableAssistantMessageInstance, message: any, durationMs: number): void {
   const contentContainer = component.contentContainer;
   if (!contentContainer || typeof contentContainer.clear !== "function" || typeof contentContainer.addChild !== "function") return;
@@ -294,6 +316,7 @@ function renderExpandedThinkingMessage(component: PatchableAssistantMessageInsta
   component.lastMessage = message;
   contentContainer.clear();
 
+  const transform = buildMarkdownTransform(component, "assistant");
   const contentBlocks = Array.isArray(message.content) ? message.content : [];
   const hasVisibleContent = contentBlocks.some((content: any) =>
     (content.type === "text" && typeof content.text === "string" && content.text.trim()) ||
@@ -314,7 +337,7 @@ function renderExpandedThinkingMessage(component: PatchableAssistantMessageInsta
       );
 
     if (content.type === "text" && typeof content.text === "string" && content.text.trim()) {
-      contentContainer.addChild(new Markdown(content.text.trim(), 1, 0, component.markdownTheme));
+      contentContainer.addChild(new Markdown(content.text.trim(), 1, 0, component.markdownTheme, undefined, { transform }));
     } else if (content.type === "thinking" && typeof content.thinking === "string" && content.thinking.trim()) {
       contentContainer.addChild(new Markdown(content.thinking.trim(), 1, 0, component.markdownTheme, { color: (text: string) => `${GRAY}${text}${RESET}` }));
       contentContainer.addChild(new Text(`${GRAY}${DIM}${formatLabel(durationMs, false)}${RESET}`, 1, 0));
@@ -347,6 +370,7 @@ function renderHiddenThinkingMessage(component: PatchableAssistantMessageInstanc
   component.lastMessage = message;
   contentContainer.clear();
 
+  const transform = buildMarkdownTransform(component, "assistant");
   const contentBlocks = Array.isArray(message.content) ? message.content : [];
   const hasVisibleContent = contentBlocks.some((content: any) =>
     (content.type === "text" && typeof content.text === "string" && content.text.trim()) ||
@@ -367,7 +391,7 @@ function renderHiddenThinkingMessage(component: PatchableAssistantMessageInstanc
       );
 
     if (content.type === "text" && typeof content.text === "string" && content.text.trim()) {
-      contentContainer.addChild(new Markdown(content.text.trim(), 1, 0, component.markdownTheme));
+      contentContainer.addChild(new Markdown(content.text.trim(), 1, 0, component.markdownTheme, undefined, { transform }));
     } else if (content.type === "thinking" && typeof content.thinking === "string" && content.thinking.trim()) {
       if (preview) {
         contentContainer.addChild(new VisualTailText(preview, 3, 1, 0, GRAY, RESET));
