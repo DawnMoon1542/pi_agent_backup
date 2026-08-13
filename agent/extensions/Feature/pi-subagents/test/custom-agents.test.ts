@@ -1,35 +1,102 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BUILTIN_TOOL_NAMES } from "../src/agent-types.js";
 import { loadCustomAgents } from "../src/custom-agents.js";
 
 describe("loadCustomAgents", () => {
   let tmpDir: string;
   let originalHome: string | undefined;
+  let originalAgentDir: string | undefined;
 
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), "pi-test-"));
     originalHome = process.env.HOME;
+    originalAgentDir = process.env.PI_CODING_AGENT_DIR;
     process.env.HOME = tmpDir;
+    delete process.env.PI_CODING_AGENT_DIR;
   });
 
   afterEach(() => {
     if (originalHome == null) delete process.env.HOME;
     else process.env.HOME = originalHome;
+    if (originalAgentDir == null) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  function writeAgent(name: string, content: string) {
-    const dir = join(tmpDir, ".pi", "agents");
+  function writeAgentIn(projectDir: ".agents" | ".pi", name: string, content: string) {
+    const dir = join(tmpDir, projectDir, "agents");
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, `${name}.md`), content);
   }
 
-  it("returns empty map when .pi/agents/ does not exist", () => {
+  function writeAgent(name: string, content: string) {
+    writeAgentIn(".pi", name, content);
+  }
+
+  function writeWorkspaceAgent(name: string, content: string) {
+    writeAgentIn(".agents", name, content);
+  }
+
+  it("returns empty map when custom agent dirs do not exist", () => {
     const result = loadCustomAgents(tmpDir);
     expect(result.size).toBe(0);
+  });
+
+  it("loads a workspace project agent from .agents/agents", () => {
+    writeWorkspaceAgent("reviewer", `---
+description: Workspace Reviewer
+---
+
+Workspace prompt.`);
+
+    const result = loadCustomAgents(tmpDir);
+    expect(result.size).toBe(1);
+    expect(result.get("reviewer")?.description).toBe("Workspace Reviewer");
+    expect(result.get("reviewer")?.systemPrompt).toBe("Workspace prompt.");
+    expect(result.get("reviewer")?.source).toBe("project");
+  });
+
+  it(".pi/agents overrides .agents/agents on a name clash", () => {
+    writeWorkspaceAgent("dupe", `---
+description: Workspace Project
+---
+
+Workspace prompt.`);
+    writeAgent("dupe", `---
+description: Pi Project
+---
+
+Pi prompt.`);
+
+    const result = loadCustomAgents(tmpDir);
+    expect(result.size).toBe(1);
+    expect(result.get("dupe")?.description).toBe("Pi Project");
+    expect(result.get("dupe")?.systemPrompt).toBe("Pi prompt.");
+  });
+
+  it("workspace project agents override global agents", () => {
+    const globalAgentDir = join(tmpDir, "global-agent-dir");
+    process.env.PI_CODING_AGENT_DIR = globalAgentDir;
+    const globalAgents = join(globalAgentDir, "agents");
+    mkdirSync(globalAgents, { recursive: true });
+    writeFileSync(join(globalAgents, "dupe.md"), `---
+description: Global
+---
+
+Global prompt.`);
+    writeWorkspaceAgent("dupe", `---
+description: Workspace Project
+---
+
+Workspace prompt.`);
+
+    const result = loadCustomAgents(tmpDir);
+    expect(result.size).toBe(1);
+    expect(result.get("dupe")?.description).toBe("Workspace Project");
+    expect(result.get("dupe")?.systemPrompt).toBe("Workspace prompt.");
   });
 
   it("loads a basic agent with all frontmatter fields", () => {
@@ -39,6 +106,10 @@ tools: read, grep, find
 model: anthropic/claude-opus-4-6
 thinking: high
 max_turns: 30
+persist_session: true
+output_transcript: false
+session_dir: .seams/pi-sessions/seam-plan-reviewer
+allowed_subagents: scout, reviewer
 prompt_mode: replace
 inherit_context: true
 run_in_background: true
@@ -57,6 +128,10 @@ You are a security auditor.`);
     expect(agent.model).toBe("anthropic/claude-opus-4-6");
     expect(agent.thinking).toBe("high");
     expect(agent.maxTurns).toBe(30);
+    expect(agent.persistSession).toBe(true);
+    expect(agent.outputTranscript).toBe(false);
+    expect(agent.sessionDir).toBe(".seams/pi-sessions/seam-plan-reviewer");
+    expect(agent.allowedSubagents).toEqual(["scout", "reviewer"]);
     expect(agent.promptMode).toBe("replace");
     expect(agent.inheritContext).toBe(true);
     expect(agent.runInBackground).toBe(true);
@@ -81,6 +156,10 @@ Just a prompt.`);
     expect(agent.model).toBeUndefined();
     expect(agent.thinking).toBeUndefined();
     expect(agent.maxTurns).toBeUndefined();
+    expect(agent.persistSession).toBeUndefined();
+    expect(agent.outputTranscript).toBeUndefined();
+    expect(agent.sessionDir).toBeUndefined();
+    expect(agent.allowedSubagents).toBeUndefined();
     expect(agent.promptMode).toBe("replace");
     expect(agent.inheritContext).toBeUndefined();
     expect(agent.runInBackground).toBeUndefined();
@@ -98,6 +177,60 @@ Just a prompt.`);
     expect(agent.description).toBe("bare");
     expect(agent.builtinToolNames).toEqual(BUILTIN_TOOL_NAMES);
     expect(agent.systemPrompt).toBe("Just a system prompt, no frontmatter.");
+  });
+
+  it("parses allowed_subagents: off by default, `all` wildcard, csv restriction", () => {
+    writeAgent("omitted", `---
+---
+Off.`);
+    writeAgent("unrestricted", `---
+allowed_subagents: all
+---
+Unrestricted.`);
+    writeAgent("wildcard", `---
+allowed_subagents: "*"
+---
+Unrestricted.`);
+    writeAgent("mixed-case", `---
+allowed_subagents: scout, ALL
+---
+Unrestricted.`);
+    writeAgent("none", `---
+allowed_subagents: none
+---
+Off.`);
+    writeAgent("blank", `---
+allowed_subagents:
+---
+Off.`);
+    writeAgent("restricted", `---
+allowed_subagents: scout, reviewer
+---
+Restricted.`);
+
+    const result = loadCustomAgents(tmpDir);
+    expect(result.get("omitted")!.allowedSubagents).toBeUndefined();
+    expect(result.get("unrestricted")!.allowedSubagents).toBe("all");
+    expect(result.get("wildcard")!.allowedSubagents).toBe("all");
+    expect(result.get("mixed-case")!.allowedSubagents).toBe("all");
+    expect(result.get("none")!.allowedSubagents).toBeUndefined();
+    expect(result.get("blank")!.allowedSubagents).toBeUndefined();
+    expect(result.get("restricted")!.allowedSubagents).toEqual(["scout", "reviewer"]);
+  });
+
+  it("accepts booleans like extensions:/skills: do, instead of a type named \"true\"", () => {
+    writeAgent("bool-on", `---
+allowed_subagents: true
+---
+On.`);
+    writeAgent("bool-off", `---
+allowed_subagents: false
+---
+Off.`);
+
+    const result = loadCustomAgents(tmpDir);
+    expect(result.get("bool-on")!.allowedSubagents).toBe("all");
+    expect(result.get("bool-off")!.allowedSubagents).toBeUndefined();
   });
 
   it("handles tools: none → empty array", () => {
@@ -139,6 +272,49 @@ Partial access.`);
     expect(agent.skills).toEqual(["planning", "review"]);
   });
 
+  it("parses exclude_extensions CSV", () => {
+    writeAgent("no-notify", `---
+extensions: true
+exclude_extensions: pi-notify, telemetry
+---
+
+No notifications.`);
+
+    const result = loadCustomAgents(tmpDir);
+    const agent = result.get("no-notify")!;
+    expect(agent.extensions).toBe(true);
+    expect(agent.excludeExtensions).toEqual(["pi-notify", "telemetry"]);
+  });
+
+  it("parses exclude_extensions YAML list", () => {
+    writeAgent("no-notify-yaml", `---
+exclude_extensions:
+  - pi-notify
+---
+
+No notifications.`);
+
+    const result = loadCustomAgents(tmpDir);
+    expect(result.get("no-notify-yaml")!.excludeExtensions).toEqual(["pi-notify"]);
+  });
+
+  it("exclude_extensions omitted or none → undefined", () => {
+    writeAgent("plain", `---
+description: plain
+---
+
+Plain.`);
+    writeAgent("explicit-none", `---
+exclude_extensions: none
+---
+
+None.`);
+
+    const result = loadCustomAgents(tmpDir);
+    expect(result.get("plain")!.excludeExtensions).toBeUndefined();
+    expect(result.get("explicit-none")!.excludeExtensions).toBeUndefined();
+  });
+
   it("passes through unknown tool names (not filtered)", () => {
     writeAgent("custom-tools", `---
 tools: read, my_custom_tool, grep
@@ -151,6 +327,77 @@ Custom tools.`);
     expect(result.get("custom-tools")!.builtinToolNames).toEqual(["read", "my_custom_tool", "grep"]);
   });
 
+  it("partitions tools: ext: entries out of builtinToolNames into extSelectors", () => {
+    writeAgent("ext-agent", `---
+tools: read, ext:foo, ext:bar/x
+---
+
+Extension selectors.`);
+
+    const agent = loadCustomAgents(tmpDir).get("ext-agent")!;
+    expect(agent.builtinToolNames).toEqual(["read"]);
+    expect(agent.extSelectors).toEqual(["ext:foo", "ext:bar/x"]);
+  });
+
+  it("tools: with only ext: entries yields zero built-ins", () => {
+    writeAgent("ext-only", `---
+tools: ext:foo/bar
+---
+
+Ext only.`);
+
+    const agent = loadCustomAgents(tmpDir).get("ext-only")!;
+    expect(agent.builtinToolNames).toEqual([]);
+    expect(agent.extSelectors).toEqual(["ext:foo/bar"]);
+  });
+
+  it("tools: '*' expands to all built-ins and composes with ext: selectors", () => {
+    writeAgent("wild", `---
+tools: "*, ext:foo"
+---
+
+Wildcard plus ext.`);
+
+    const agent = loadCustomAgents(tmpDir).get("wild")!;
+    expect(agent.builtinToolNames).toEqual(BUILTIN_TOOL_NAMES);
+    expect(agent.extSelectors).toEqual(["ext:foo"]);
+  });
+
+  it("tools: 'all' is a case-insensitive alias for '*' (closes #75)", () => {
+    // `tools: all` previously parsed "all" as a single tool name → allowlist
+    // containing the non-existent tool "all" → silent zero-tool agent.
+    for (const [name, value] of [["all-lower", "all"], ["all-upper", "ALL"], ["all-mixed", "All"]]) {
+      writeAgent(name, `---\ntools: ${value}\n---\n\nAlias.`);
+      const agent = loadCustomAgents(tmpDir).get(name)!;
+      expect(agent.builtinToolNames).toEqual(BUILTIN_TOOL_NAMES);
+      expect(agent.extSelectors).toBeUndefined();
+    }
+  });
+
+  it("tools: 'all' composes with ext: selectors like '*'", () => {
+    writeAgent("all-plus-ext", `---
+tools: "all, ext:foo"
+---
+
+All plus ext.`);
+
+    const agent = loadCustomAgents(tmpDir).get("all-plus-ext")!;
+    expect(agent.builtinToolNames).toEqual(BUILTIN_TOOL_NAMES);
+    expect(agent.extSelectors).toEqual(["ext:foo"]);
+  });
+
+  it("leaves extSelectors undefined when tools: has no ext: entries", () => {
+    writeAgent("plain", `---
+tools: read, bash
+---
+
+Plain tools.`);
+
+    const agent = loadCustomAgents(tmpDir).get("plain")!;
+    expect(agent.builtinToolNames).toEqual(["read", "bash"]);
+    expect(agent.extSelectors).toBeUndefined();
+  });
+
   it("passes through thinking level as-is (no validation)", () => {
     writeAgent("anythink", `---
 thinking: turbo
@@ -161,6 +408,17 @@ Any thinking.`);
     const result = loadCustomAgents(tmpDir);
     // Pi validates at session creation — we just pass through
     expect(result.get("anythink")!.thinking).toBe("turbo");
+  });
+
+  it("loads thinking: max (pi 0.80's top level) unchanged (#147)", () => {
+    writeAgent("deepthink", `---
+thinking: max
+---
+
+Think hard.`);
+
+    const result = loadCustomAgents(tmpDir);
+    expect(result.get("deepthink")!.thinking).toBe("max");
   });
 
   it("accepts max_turns: 0 as unlimited", () => {
@@ -435,6 +693,154 @@ Bad isolation.`);
 
     const result = loadCustomAgents(tmpDir);
     expect(result.get("bad-isolation")!.isolation).toBeUndefined();
+  });
+
+  // A YAML error in one file used to escape loadFromDir and abort the whole
+  // extension load — pi exited 1 before the TUI. Regression for #212.
+  it("skips a file with malformed frontmatter and still loads the others", () => {
+    // Unquoted `description` containing ": " — the shape Claude Code tolerates.
+    writeAgent("broken", `---
+name: broken
+description: Use this: that
+---
+
+Broken body.`);
+    writeAgent("good", `---
+description: Still loads
+---
+
+Good body.`);
+
+    const result = loadCustomAgents(tmpDir);
+
+    expect(result.has("broken")).toBe(false);
+    expect(result.get("good")?.description).toBe("Still loads");
+  });
+
+  it("names the offending file and the reason when skipping it", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      writeAgent("broken", "---\nname: broken\ndescription: Use this: that\n---\n\nBroken body.");
+
+      loadCustomAgents(tmpDir);
+
+      const message = warn.mock.calls.map(args => String(args[0])).join("\n");
+      expect(message).toContain(join(tmpDir, ".pi", "agents", "broken.md"));
+      expect(message).toContain("Nested mappings are not allowed");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  // Skipping an override is not the same as skipping an agent: the name still
+  // resolves, to a different prompt, model and tool policy. Nothing downstream
+  // can flag that, because the Agent call succeeds.
+  it("warns when a skipped file was overriding an agent that stays resolvable", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      writeWorkspaceAgent("dup", "---\ndescription: Earlier definition\n---\n\nEarlier body.");
+      writeAgent("dup", "---\nname: dup\ndescription: Use this: that\n---\n\nBroken body.");
+
+      const result = loadCustomAgents(tmpDir);
+
+      expect(result.get("dup")?.description).toBe("Earlier definition");
+      const message = warn.mock.calls.map(args => String(args[0])).join("\n");
+      expect(message).toContain(`Agent "dup" now loads from ${join(tmpDir, ".agents", "agents", "dup.md")} instead`);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  // A disabled agent does not dispatch (resolveEnabledTypeIn), so claiming the
+  // name "still resolves" to it would send the user chasing the wrong file.
+  it("does not claim a fallback when the shadowed definition is disabled", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      writeWorkspaceAgent("dup", "---\ndescription: Earlier definition\nenabled: false\n---\n\nEarlier body.");
+      writeAgent("dup", "---\nname: dup\ndescription: Use this: that\n---\n\nBroken body.");
+
+      loadCustomAgents(tmpDir);
+
+      const message = warn.mock.calls.map(args => String(args[0])).join("\n");
+      expect(message).toContain("Skipping agent file");
+      expect(message).not.toContain("now loads from");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("does not claim a fallback when the skipped file overrode nothing", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      writeAgent("lonely", "---\nname: lonely\ndescription: Use this: that\n---\n\nBroken body.");
+
+      loadCustomAgents(tmpDir);
+
+      const message = warn.mock.calls.map(args => String(args[0])).join("\n");
+      expect(message).toContain("Skipping agent file");
+      expect(message).not.toContain("now loads from");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  // strictAgentFiles: opt in to failing closed rather than running a substitute.
+  it("throws naming the file when strict, and skips it when not", () => {
+    writeAgent("broken", "---\nname: broken\ndescription: Use this: that\n---\n\nBroken.");
+    writeAgent("healthy", "---\ndescription: Fine\n---\n\nFine.");
+    const brokenPath = join(tmpDir, ".pi", "agents", "broken.md");
+
+    expect(() => loadCustomAgents(tmpDir, true)).toThrow(brokenPath);
+    expect(() => loadCustomAgents(tmpDir, true)).toThrow("Nested mappings are not allowed");
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const result = loadCustomAgents(tmpDir);
+      expect(result.has("broken")).toBe(false);
+      expect(result.has("healthy")).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  // The rule is "warn when it breaks, stay quiet while it stays broken".
+  // Suppressing an unchanged problem must not suppress it forever.
+  it("warns when a file breaks, not while it stays broken", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      // Two loads while broken: the second must be suppressed as unchanged.
+      writeAgent("flip", "---\nname: flip\ndescription: Use this: that\n---\n\nBroken.");
+      loadCustomAgents(tmpDir);
+      loadCustomAgents(tmpDir);
+      expect(warn).toHaveBeenCalledTimes(1);
+
+      writeAgent("flip", "---\ndescription: Fixed\n---\n\nFixed.");
+      expect(loadCustomAgents(tmpDir).get("flip")?.description).toBe("Fixed");
+
+      // Same breakage again — a new problem, not the one already reported.
+      writeAgent("flip", "---\nname: flip\ndescription: Use this: that\n---\n\nBroken.");
+      loadCustomAgents(tmpDir);
+
+      expect(warn).toHaveBeenCalledTimes(2);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  // Agents reload on every Agent call, so repeating would scribble a live TUI.
+  it("warns once per message, not on every reload", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      writeAgent("noisy", "---\nname: noisy\ndescription: Use this: that\n---\n\nBroken body.");
+
+      loadCustomAgents(tmpDir);
+      loadCustomAgents(tmpDir);
+      loadCustomAgents(tmpDir);
+
+      expect(warn).toHaveBeenCalledTimes(1);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("honors PI_CODING_AGENT_DIR for global custom agent discovery", () => {

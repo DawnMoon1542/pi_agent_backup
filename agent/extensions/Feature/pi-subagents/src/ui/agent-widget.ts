@@ -8,7 +8,7 @@
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import type { AgentManager } from "../agent-manager.js";
 import { getConfig } from "../agent-types.js";
-import type { AgentInvocation, SubagentType } from "../types.js";
+import type { AgentInvocation, SubagentType, WidgetMode } from "../types.js";
 import { getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, type SessionLike } from "../usage.js";
 
 // ---- Constants ----
@@ -78,8 +78,6 @@ export interface AgentDetails {
   spinnerFrame?: number;
   /** Short model name if different from parent (e.g. "haiku", "sonnet"). */
   modelName?: string;
-  /** Raw response text from the agent (for streaming preview). */
-  responseText?: string;
   /** Notable config tags (e.g. ["thinking: high", "isolated"]). */
   tags?: string[];
   /** Current turn count. */
@@ -92,6 +90,13 @@ export interface AgentDetails {
 
 // ---- Formatting helpers ----
 
+/** Apply foreground styling while restoring it after nested foreground/full ANSI resets. */
+export function fgPreservingNestedStyles(theme: Theme, color: string, text: string): string {
+  const styledEmpty = theme.fg(color, "");
+  const styleStart = styledEmpty.replace(/\u001b\[(?:0|39)m/g, "");
+  return theme.fg(color, text.replace(/\u001b\[(?:0|39)m/g, reset => `${reset}${styleStart}`));
+}
+
 /** Format a token count compactly: "33.8k token", "1.2M token". */
 export function formatTokens(count: number): string {
   if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M token`;
@@ -102,12 +107,12 @@ export function formatTokens(count: number): string {
 /**
  * Token count with optional context-fill % and compaction-count annotations.
  * Thresholds for percent: <70% dim, 70–85% warning, ≥85% error.
- * Compaction count rendered as `↻N` in dim.
+ * Compaction count rendered as `⇊N` in dim.
  *
  *   "12.3k token"               — no annotations
  *   "12.3k token (45%)"         — percent only
- *   "12.3k token (↻2)"          — compactions only (e.g. right after compact)
- *   "12.3k token (45% · ↻2)"    — both
+ *   "12.3k token (⇊2)"          — compactions only (e.g. right after compact)
+ *   "12.3k token (45% · ⇊2)"    — both
  */
 export function formatSessionTokens(
   tokens: number,
@@ -122,15 +127,15 @@ export function formatSessionTokens(
     annot.push(theme.fg(color, `${Math.round(percent)}%`));
   }
   if (compactions > 0) {
-    annot.push(theme.fg("dim", `↻${compactions}`));
+    annot.push(theme.fg("dim", `⇊${compactions}`));
   }
   if (annot.length === 0) return tokenStr;
   return `${tokenStr} (${annot.join(" · ")})`;
 }
 
-/** Format turn count with optional max limit: "⟳5≤30" or "⟳5". */
+/** Format turn count with optional max limit: "↻5≤30" or "↻5". */
 export function formatTurns(turnCount: number, maxTurns?: number | null): string {
-  return maxTurns != null ? `⟳${turnCount}≤${maxTurns}` : `⟳${turnCount}`;
+  return maxTurns != null ? `↻${turnCount}≤${maxTurns}` : `↻${turnCount}`;
 }
 
 /** Format milliseconds as human-readable duration. */
@@ -226,7 +231,33 @@ export class AgentWidget {
   constructor(
     private manager: AgentManager,
     private agentActivity: Map<string, AgentActivity>,
+    /**
+     * Read live at render time. Selects which agents the widget shows — see
+     * `WidgetMode`. Defaults to `"all"` when a caller supplies no policy; the
+     * extension supplies one defaulting to `"background"`.
+     */
+    private mode: () => WidgetMode = () => "all",
   ) {}
+
+  /**
+   * Agents eligible for the widget, per the current `WidgetMode`:
+   *   - `off`: none (the widget's existing empty-state path hides it entirely).
+   *   - `background`: drop only agents *known* to be foreground
+   *     (`isBackground === false`); keep everything else — background, queued,
+   *     scheduled, or RPC-spawned (`undefined`). Keying off the `isBackground`
+   *     record flag rather than the UI-only `invocation` snapshot (which only the
+   *     Agent-tool path sets), and excluding rather than allow-listing, means
+   *     only proven-foreground runs drop out — nothing else silently vanishes.
+   *   - `all`: every agent.
+   */
+  private widgetAgents() {
+    const all = this.manager.listAgents().filter(a => !a.parentAgentId);
+    switch (this.mode()) {
+      case "off": return [];
+      case "background": return all.filter(a => a.isBackground !== false);
+      default: return all;
+    }
+  }
 
   /** Set the UI context (grabbed from first tool execution). */
   setUICtx(ctx: UICtx) {
@@ -316,7 +347,7 @@ export class AgentWidget {
    * reading live state each time instead of capturing it in a closure.
    */
   private renderWidget(tui: any, theme: Theme): string[] {
-    const allAgents = this.manager.listAgents();
+    const allAgents = this.widgetAgents();
     const running = allAgents.filter(a => a.status === "running");
     const queued = allAgents.filter(a => a.status === "queued");
     const finished = allAgents.filter(a =>
@@ -367,7 +398,7 @@ export class AgentWidget {
       const activity = bg ? describeActivity(bg.activeTools, bg.responseText) : "thinking…";
 
       runningLines.push([
-        truncate(theme.fg("dim", "├─") + ` ${theme.fg("accent", frame)} ${theme.bold(name)}${modeTag}  ${theme.fg("muted", a.description)} ${theme.fg("dim", "·")} ${theme.fg("dim", statsText)}`),
+        truncate(theme.fg("dim", "├─") + ` ${theme.fg("accent", frame)} ${theme.bold(name)}${modeTag}  ${theme.fg("muted", a.description)} ${theme.fg("dim", "·")} ${fgPreservingNestedStyles(theme, "dim", statsText)}`),
         truncate(theme.fg("dim", "│  ") + theme.fg("dim", `  ⎿  ${activity}`)),
       ]);
     }
@@ -450,7 +481,7 @@ export class AgentWidget {
   /** Force an immediate widget update. */
   update() {
     if (!this.uiCtx) return;
-    const allAgents = this.manager.listAgents();
+    const allAgents = this.widgetAgents();
 
     // Lightweight existence checks — full categorization happens in renderWidget()
     let runningCount = 0;

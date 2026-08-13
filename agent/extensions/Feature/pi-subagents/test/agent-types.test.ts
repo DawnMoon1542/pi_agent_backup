@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   BUILTIN_TOOL_NAMES,
   getAgentConfig,
@@ -9,10 +9,18 @@ import {
   getReadOnlyMemoryToolNames,
   getToolNamesForType,
   getUserAgentNames,
+  isDefaultsDisabled,
   isValidType,
+  NO_FALLBACK,
   registerAgents,
+  resolveEnabledTypeIn,
+  resolveSpawnType,
+  resolveSpawnTypeIn,
   resolveType,
+  setDefaultsDisabled,
+  setFallbackSubagent,
 } from "../src/agent-types.js";
+import { DEFAULT_AGENTS } from "../src/default-agents.js";
 import type { AgentConfig } from "../src/types.js";
 
 function makeAgentConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
@@ -63,7 +71,7 @@ describe("agent type registry", () => {
     it("case-insensitive lookup works for getAgentConfig", () => {
       const config = getAgentConfig("explore");
       expect(config?.name).toBe("Explore");
-      expect(config?.model).toBe("anthropic/claude-haiku-4-5-20251001");
+      expect(config?.model).toBe("anthropic/claude-haiku-4-5");
     });
 
     it("resolveType returns canonical key or undefined", () => {
@@ -90,7 +98,7 @@ describe("agent type registry", () => {
 
     it("Explore has haiku model in config", () => {
       const cfg = getAgentConfig("Explore");
-      expect(cfg?.model).toBe("anthropic/claude-haiku-4-5-20251001");
+      expect(cfg?.model).toBe("anthropic/claude-haiku-4-5");
     });
 
     it("default agents are marked isDefault", () => {
@@ -126,6 +134,59 @@ describe("agent type registry", () => {
       expect(BUILTIN_TOOL_NAMES).toContain("find");
       expect(BUILTIN_TOOL_NAMES).toContain("ls");
       expect(BUILTIN_TOOL_NAMES.length).toBeGreaterThanOrEqual(7);
+    });
+  });
+
+  describe("disable defaults", () => {
+    // Module-level flag — always reset so later describes see the default roster.
+    afterEach(() => {
+      setDefaultsDisabled(false);
+      registerAgents(new Map());
+    });
+
+    it("defaults to enabled", () => {
+      expect(isDefaultsDisabled()).toBe(false);
+    });
+
+    it("registerAgents skips DEFAULT_AGENTS when disabled", () => {
+      setDefaultsDisabled(true);
+      registerAgents(new Map());
+
+      expect(getAvailableTypes()).toEqual([]);
+      expect(isValidType("general-purpose")).toBe(false);
+      expect(isValidType("Explore")).toBe(false);
+      expect(isValidType("Plan")).toBe(false);
+    });
+
+    it("user agents are unaffected when defaults are disabled", () => {
+      setDefaultsDisabled(true);
+      registerAgents(new Map([["auditor", makeAgentConfig({ name: "auditor" })]]));
+
+      expect(getAvailableTypes()).toEqual(["auditor"]);
+      expect(isValidType("auditor")).toBe(true);
+      expect(getDefaultAgentNames()).toEqual([]);
+    });
+
+    it("re-enabling restores defaults on next registerAgents", () => {
+      setDefaultsDisabled(true);
+      registerAgents(new Map());
+      expect(isValidType("general-purpose")).toBe(false);
+
+      setDefaultsDisabled(false);
+      registerAgents(new Map());
+      expect(isValidType("general-purpose")).toBe(true);
+      expect(isValidType("Explore")).toBe(true);
+      expect(isValidType("Plan")).toBe(true);
+    });
+
+    it("getConfig falls back to the hardcoded config when defaults are disabled and no user agents exist", () => {
+      setDefaultsDisabled(true);
+      registerAgents(new Map());
+
+      const config = getConfig("general-purpose");
+      expect(config.displayName).toBe("Agent");
+      expect(config.builtinToolNames).toEqual(BUILTIN_TOOL_NAMES);
+      expect(config.promptMode).toBe("append");
     });
   });
 
@@ -202,10 +263,21 @@ describe("agent type registry", () => {
       expect(names).toEqual(["read", "grep", "find"]);
     });
 
+    it("getToolNamesForType honors an explicit empty builtinToolNames as zero built-ins", () => {
+      // `tools: none` and `tools:` with only `ext:` entries both produce `[]`.
+      const agents = new Map([["ext-only", makeAgentConfig({
+        name: "ext-only",
+        builtinToolNames: [],
+      })]]);
+      registerAgents(agents);
+
+      expect(getToolNamesForType("ext-only")).toEqual([]);
+    });
+
     it("getConfig falls back to general-purpose for unknown types", () => {
       const config = getConfig("nonexistent");
       expect(config.displayName).toBe("Agent");
-      expect(config.description).toBe("General-purpose agent for complex, multi-step tasks");
+      expect(config.description).toBe(DEFAULT_AGENTS.get("general-purpose")?.description);
     });
 
     it("clearing user agents works (defaults remain)", () => {
@@ -285,6 +357,137 @@ describe("agent type registry", () => {
     it("returns empty when read already exists", () => {
       const names = getReadOnlyMemoryToolNames(new Set(["read"]));
       expect(names).toHaveLength(0);
+    });
+  });
+
+  describe("BUILTIN_TOOL_NAMES", () => {
+    // BUILTIN_TOOL_NAMES is derived dynamically from pi's tool factories
+    // (createCodingTools + createReadOnlyTools). This guards against pi-mono
+    // dropping/renaming a built-in: the set must still contain at least these
+    // 7. It's a superset check ("at least") — pi adding a new built-in is fine
+    // and won't fail this test.
+    const EXPECTED = ["read", "bash", "edit", "write", "grep", "find", "ls"];
+
+    it("contains at least the 7 known built-ins", () => {
+      for (const name of EXPECTED) {
+        expect(BUILTIN_TOOL_NAMES).toContain(name);
+      }
+    });
+
+    it("has no duplicate entries", () => {
+      expect(new Set(BUILTIN_TOOL_NAMES).size).toBe(BUILTIN_TOOL_NAMES.length);
+    });
+  });
+});
+
+describe("resolveSpawnType — fail-closed dispatch (#183)", () => {
+  afterEach(() => {
+    setFallbackSubagent(undefined);
+    setDefaultsDisabled(false);
+    registerAgents(new Map());
+  });
+
+  const roster = () => new Map([
+    ["scout", makeAgentConfig({ name: "scout" })],
+    ["retired", makeAgentConfig({ name: "retired", enabled: false })],
+    ["router", makeAgentConfig({ name: "router" })],
+  ]);
+
+  it("resolves an enabled type case-insensitively", () => {
+    registerAgents(roster());
+    expect(resolveSpawnType("SCOUT")).toEqual({ ok: true, type: "scout" });
+  });
+
+  it("falls back to general-purpose when unset, reporting what was asked for", () => {
+    registerAgents(roster());
+    expect(resolveSpawnType("typoo")).toEqual({
+      ok: true, type: "general-purpose", fellBackFrom: "typoo",
+    });
+  });
+
+  it("rejects unknown types under `none` and names what is available", () => {
+    registerAgents(roster());
+    setFallbackSubagent(NO_FALLBACK);
+    const r = resolveSpawnType("typoo");
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error("expected rejection");
+    expect(r.message).toContain('Unknown or disabled agent type: "typoo"');
+    expect(r.message).toContain("scout");
+    expect(r.message).not.toContain("retired"); // disabled agents aren't offered
+  });
+
+  it("treats a disabled type as unresolvable, not as a valid name", () => {
+    // Regression: the old path used resolveType(), which ignores `enabled`, so a
+    // disabled agent dispatched with its own prompt and general-purpose's tools.
+    registerAgents(roster());
+    expect(resolveSpawnType("retired")).toEqual({
+      ok: true, type: "general-purpose", fellBackFrom: "retired",
+    });
+    setFallbackSubagent(NO_FALLBACK);
+    expect(resolveSpawnType("retired").ok).toBe(false);
+  });
+
+  it("refuses to guess between two types differing only by case", () => {
+    registerAgents(new Map([
+      ["Scout", makeAgentConfig({ name: "Scout" })],
+      ["scout", makeAgentConfig({ name: "scout" })],
+    ]));
+    // An exact match is still unambiguous...
+    expect(resolveSpawnType("scout")).toEqual({ ok: true, type: "scout" });
+    // ...but a differently-cased spelling matches both, so it must not pick one.
+    expect(resolveSpawnType("SCOUT").ok).toBe(true);
+    expect(resolveSpawnType("SCOUT")).toEqual({
+      ok: true, type: "general-purpose", fellBackFrom: "SCOUT",
+    });
+  });
+
+  it("routes unresolvable types to a named fallback agent", () => {
+    registerAgents(roster());
+    setFallbackSubagent("router");
+    expect(resolveSpawnType("typoo")).toEqual({
+      ok: true, type: "router", fellBackFrom: "typoo",
+    });
+  });
+
+  it("fails loudly when the configured fallback is itself unusable", () => {
+    // Explicit configuration that cannot work is a misconfiguration, not a
+    // second chance to guess — never a silent drop to general-purpose.
+    registerAgents(roster());
+    setFallbackSubagent("retired");
+    const r = resolveSpawnType("typoo");
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error("expected rejection");
+    expect(r.message).toContain("fallbackSubagent");
+  });
+
+  it("treats a missing type like any other unresolvable one", () => {
+    // Before this setting existed an empty type fell back like a typo; only
+    // opting in should change that, so the default must stay permissive.
+    registerAgents(roster());
+    for (const empty of ["", "   ", undefined]) {
+      expect(resolveSpawnType(empty)).toMatchObject({ ok: true, type: "general-purpose" });
+    }
+
+    setFallbackSubagent(NO_FALLBACK);
+    for (const empty of ["", "   ", undefined]) {
+      const r = resolveSpawnType(empty);
+      expect(r.ok).toBe(false);
+      if (r.ok) throw new Error("expected rejection");
+      expect(r.message).toContain("No agent type given");
+    }
+  });
+
+  it("resolves strictly regardless of the setting, for nested delegation", () => {
+    // Nested delegation uses this seam so a project-level fallback can't hand a
+    // nested caller an agent its allowlist never named.
+    const registry = roster();
+    setFallbackSubagent("router");
+    expect(resolveEnabledTypeIn(registry, "typoo")).toBeUndefined();
+    expect(resolveEnabledTypeIn(registry, "retired")).toBeUndefined();
+    expect(resolveEnabledTypeIn(registry, " SCOUT ")).toBe("scout");
+    // ...while the policy layer still honors it.
+    expect(resolveSpawnTypeIn(registry, "typoo")).toEqual({
+      ok: true, type: "router", fellBackFrom: "typoo",
     });
   });
 });

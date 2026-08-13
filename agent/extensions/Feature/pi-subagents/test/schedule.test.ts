@@ -14,6 +14,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { NO_FALLBACK, registerAgents, setFallbackSubagent } from "../src/agent-types.js";
 import { SubagentScheduler } from "../src/schedule.js";
 import { ScheduleStore } from "../src/schedule-store.js";
 
@@ -248,6 +249,10 @@ describe("SubagentScheduler — fire path", () => {
   afterEach(() => {
     scheduler.stop();
     vi.useRealTimers();
+    // Module-global: restore here, not at the end of a test body, so a failing
+    // assertion can't leak strict dispatch into every test that follows.
+    setFallbackSubagent(undefined);
+    registerAgents(new Map());
     rmSync(tmp, { recursive: true, force: true });
   });
 
@@ -262,6 +267,32 @@ describe("SubagentScheduler — fire path", () => {
     expect(manager.spawn).toHaveBeenCalledTimes(1);
     vi.advanceTimersByTime(20_000);
     expect(manager.spawn).toHaveBeenCalledTimes(3);
+  });
+
+  it("refuses at fire time when the job's agent type no longer resolves", () => {
+    // The registry is what production populates at activation; a job outliving
+    // its agent must not silently run something else (#183).
+    registerAgents(new Map());
+    setFallbackSubagent(NO_FALLBACK);
+    const job = scheduler.addJob({
+      name: "gone", description: "vanished agent", schedule: "+1s",
+      subagent_type: "deleted-since", prompt: "run",
+    });
+
+    vi.advanceTimersByTime(2_000);
+
+    expect(manager.spawn).not.toHaveBeenCalled();
+    const stored = store.get(job.id);
+    expect(stored?.lastStatus).toBe("error");
+    // Pin WHY it failed — "didn't spawn" alone would be satisfied by any
+    // unrelated pre-spawn throw.
+    expect(pi.events.emit).toHaveBeenCalledWith(
+      "subagents:scheduled",
+      expect.objectContaining({
+        type: "error",
+        error: expect.stringContaining("Unknown or disabled agent type"),
+      }),
+    );
   });
 
   it("one-shot fires once and auto-disables", async () => {

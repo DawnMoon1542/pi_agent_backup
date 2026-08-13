@@ -2,7 +2,7 @@
  * types.ts — Type definitions for the subagent system.
  */
 
-import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
+import type { ThinkingLevel } from "@earendil-works/pi-ai";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import type { LifetimeUsage } from "./usage.js";
 
@@ -26,15 +26,32 @@ export interface AgentConfig {
   displayName?: string;
   description: string;
   builtinToolNames?: string[];
+  /** Raw `ext:` selector entries from the `tools:` CSV, e.g. ["ext:foo", "ext:bar/x"].
+   * Presence of any entry flips extension tools to an explicit allowlist. */
+  extSelectors?: string[];
   /** Tool denylist — these tools are removed even if `builtinToolNames` or extensions include them. */
   disallowedTools?: string[];
   /** true = inherit all, string[] = only listed, false = none */
   extensions: true | string[] | false;
+  /** Extension-name denylist applied after the `extensions:` include set. Exclude wins.
+   * Plain canonical names only (case-insensitive); no paths, no wildcard. */
+  excludeExtensions?: string[];
   /** true = inherit all, string[] = only listed, false = none */
   skills: true | string[] | false;
   model?: string;
   thinking?: ThinkingLevel;
   maxTurns?: number;
+  /** Persist this subagent as a normal pi session instead of keeping it in memory only. */
+  persistSession?: boolean;
+  /** Write the subagent's .output transcript. Defaults to true; false suppresses only that transcript. */
+  outputTranscript?: boolean;
+  /** Optional session directory used when persistSession is true. Omitted = pi's normal session location. */
+  sessionDir?: string;
+  /**
+   * Nested delegation, off by default: undefined = no nested tools;
+   * "all" = any enabled agent; string[] = only those agent types.
+   */
+  allowedSubagents?: "all" | string[];
   systemPrompt: string;
   promptMode: "replace" | "append";
   /** Default for spawn: fork parent conversation. undefined = caller decides. */
@@ -53,9 +70,20 @@ export interface AgentConfig {
   enabled?: boolean;
   /** Where this agent was loaded from */
   source?: "default" | "project" | "global";
+  /** Path of the .md it was loaded from. Unset for embedded defaults. */
+  sourcePath?: string;
 }
 
 export type JoinMode = 'async' | 'group' | 'smart';
+
+/**
+ * Display mode for the persistent above-editor agent widget.
+ * - `all`: show every agent (foreground + background).
+ * - `background`: hide foreground agents (they already render inline as the
+ *   Agent tool result, #118); show background/queued/scheduled/RPC.
+ * - `off`: hide the widget entirely.
+ */
+export type WidgetMode = 'all' | 'background' | 'off';
 
 export interface AgentRecord {
   id: string;
@@ -77,7 +105,7 @@ export interface AgentRecord {
   /** Steering messages queued before the session was ready. */
   pendingSteers?: string[];
   /** Worktree info if the agent is running in an isolated worktree. */
-  worktree?: { path: string; branch: string };
+  worktree?: { path: string; branch: string; baseSha: string; workPath: string };
   /** Worktree cleanup result after agent completion. */
   worktreeResult?: { hasChanges: boolean; branch?: string };
   /** The tool_use_id from the original Agent tool call. */
@@ -94,8 +122,31 @@ export interface AgentRecord {
   lifetimeUsage: LifetimeUsage;
   /** Number of times this agent's session has compacted. Initialized to 0 at spawn. */
   compactionCount: number;
+  /**
+   * Whether this agent was spawned to run in the background. Tri-state, set at
+   * spawn from `SpawnOptions.isBackground`: `true` = background, `false` =
+   * foreground (has an inline Agent tool-result surface), `undefined` = the
+   * caller never declared it (e.g. a cross-extension RPC spawn, which is detached
+   * and has no inline surface). The widget's background-only filter keys off this
+   * — and excludes only explicit `false`, so `undefined` agents stay visible.
+   * Reliable across ALL spawn paths, unlike the UI-only `invocation` snapshot,
+   * which only the Agent-tool path populates.
+   */
+  isBackground?: boolean;
   /** Resolved spawn params, captured for UI display. Fixed at spawn time. */
   invocation?: AgentInvocation;
+  /** Nesting depth: top-level subagent = 1. */
+  depth?: number;
+  /** Parent agent ID for ownership-scoped nested controls. */
+  parentAgentId?: string;
+  /** Effective inherited nesting cap for this branch. */
+  maxSubagentDepth?: number;
+  /**
+   * Session id of the root (main) session this branch descends from. Nested
+   * spawns inherit it so their transcripts file under the same session
+   * directory as their ancestors' instead of the child session's own id.
+   */
+  rootSessionId?: string;
 }
 
 export interface AgentInvocation {

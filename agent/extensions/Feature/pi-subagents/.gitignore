@@ -30,6 +30,10 @@ Thumbs.db
 .pi/readcache
 .claude
 .vscode
+coverage/
+.gitnexus
+.pi/subagents.json
 
-# Lock files
-package-lock.json
+# Pi internal files
+progress.md
+CLAUDE.md

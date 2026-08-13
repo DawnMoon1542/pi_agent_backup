@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
 REMOTE_URL="https://github.com/tintinweb/pi-subagents.git"
-BRANCH="main"
+BRANCH="master"
 
 PATCH_FILE="$SCRIPT_DIR/local.patch"
 BACKUP_DIR="$SCRIPT_DIR/.update-backup"
@@ -44,7 +44,6 @@ echo "==> Fetching $BRANCH from origin..."
 git fetch origin "$BRANCH" --quiet
 
 echo "==> Extracting local patch..."
-# 注意: git diff A..B 是 B 相对于 A 的差异,我们想要本地相对于上游的差异
 git diff "origin/$BRANCH"..HEAD -- "src/" > "$PATCH_FILE"
 LOCAL_DIFF_SIZE=$(wc -c < "$PATCH_FILE" | tr -d ' ')
 
@@ -53,12 +52,6 @@ git reset --hard "origin/$BRANCH" --quiet
 
 echo "==> Removing .git directory..."
 rm -rf .git
-
-echo "==> Applying import path patches..."
-find src -name "*.ts" -exec sed -i '' 's|@mariozechner/pi-coding-agent|@earendil-works/pi-coding-agent|g' {} \;
-find src -name "*.ts" -exec sed -i '' 's|@mariozechner/pi-tui|@earendil-works/pi-tui|g' {} \;
-find src -name "*.ts" -exec sed -i '' 's|@mariozechner/pi-ai|@earendil-works/pi-ai|g' {} \;
-find src -name "*.ts" -exec sed -i '' 's|@mariozechner/pi-agent-core|@earendil-works/pi-agent-core|g' {} \;
 
 # 尝试应用本地修改
 if [ "$LOCAL_DIFF_SIZE" -gt 0 ]; then
@@ -69,7 +62,7 @@ if [ "$LOCAL_DIFF_SIZE" -gt 0 ]; then
     echo ""
     echo "⚠️  CONFLICT: local modifications could not be applied cleanly."
     echo "   Upstream changes in src/ conflict with local patches."
-    echo "   Upstream version with import path fixes has been applied."
+    echo "   Upstream version has been applied."
     echo "   Your local modifications are backed up at:"
     for f in "${files_to_backup[@]}"; do
       if [ -f "$BACKUP_DIR/$f" ]; then

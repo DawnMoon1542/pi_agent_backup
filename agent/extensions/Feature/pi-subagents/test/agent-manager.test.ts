@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentManager } from "../src/agent-manager.js";
 import type { AgentRecord } from "../src/types.js";
@@ -13,7 +14,7 @@ vi.mock("../src/worktree.js", () => ({
   pruneWorktrees: vi.fn(),
 }));
 
-import { runAgent } from "../src/agent-runner.js";
+import { resumeAgent, runAgent } from "../src/agent-runner.js";
 
 const mockPi = {} as any;
 const mockCtx = { cwd: "/tmp" } as any;
@@ -93,18 +94,276 @@ describe("AgentManager — Bug 1 race condition (resultConsumed vs onComplete)",
     expect(completedRecord!.resultConsumed).toBeFalsy();
   });
 
-  it("onComplete is not called for foreground agents", async () => {
-    let onCompleteCalled = false;
-    manager = new AgentManager(() => {
-      onCompleteCalled = true;
+  it("onComplete IS called for foreground agents (lifecycle symmetry)", async () => {
+    let completedRecord: AgentRecord | undefined;
+    manager = new AgentManager((r) => {
+      completedRecord = r;
     });
     resolvedRun();
 
-    await manager.spawnAndWait(mockPi, mockCtx, "general-purpose", "test", {
+    const { record } = await manager.spawnAndWait(mockPi, mockCtx, "general-purpose", "test", {
       description: "test",
     });
 
-    expect(onCompleteCalled).toBe(false);
+    expect(completedRecord).toBeDefined();
+    expect(completedRecord!.status).toBe("completed");
+    // resultConsumed is set by spawnAndWait so onComplete skips notifications
+    expect(completedRecord!.resultConsumed).toBe(true);
+    expect(record).toBe(completedRecord);
+  });
+});
+
+describe("AgentManager — spawnAndWait onSpawned + foreground output file wiring (#105)", () => {
+  let manager: AgentManager;
+  afterEach(() => manager?.dispose());
+
+  it("fields set on the record in onSpawned are visible when onSessionCreated fires", async () => {
+    // The load-bearing ordering guarantee: onSpawned fires synchronously inside
+    // spawn(), before runAgent's async onSessionCreated fires. index.ts relies on
+    // this to set record.outputFile so streamToOutputFile can pick it up.
+    manager = new AgentManager();
+    let capturedId: string | undefined;
+    let outputFileSeenAtSessionCreated: string | undefined;
+
+    vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts: any) => {
+      const session = mockSession();
+      // Yield one microtask to mirror real behavior: in production, onSessionCreated
+      // fires async (after network/session setup). onSpawned fires synchronously
+      // inside spawn() before runAgent's promise even starts. This await lets the
+      // remainder of startAgent (record.promise = …, onSpawned?.()) finish first.
+      await Promise.resolve();
+      opts.onSessionCreated?.(session);
+      outputFileSeenAtSessionCreated = capturedId
+        ? manager.getRecord(capturedId)?.outputFile
+        : undefined;
+      return { responseText: "done", session, aborted: false, steered: false };
+    });
+
+    await manager.spawnAndWait(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+    }, (fgId) => {
+      capturedId = fgId;
+      manager.getRecord(fgId)!.outputFile = "/fake/agent.jsonl";
+    });
+
+    expect(outputFileSeenAtSessionCreated).toBe("/fake/agent.jsonl");
+  });
+
+  it("onSpawned id matches the id returned by spawnAndWait", async () => {
+    manager = new AgentManager();
+    let spawnedId: string | undefined;
+    resolvedRun();
+
+    const { id } = await manager.spawnAndWait(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+    }, (fgId) => { spawnedId = fgId; });
+
+    expect(spawnedId).toBe(id);
+  });
+
+  it("restores the shared onSpawned callback before awaiting the foreground run", async () => {
+    manager = new AgentManager();
+    let finishFirst: ((value: any) => void) | undefined;
+    vi.mocked(runAgent)
+      .mockImplementationOnce(() => new Promise(resolve => { finishFirst = resolve; }))
+      .mockResolvedValueOnce({
+        responseText: "second",
+        session: mockSession(),
+        aborted: false,
+        steered: false,
+      });
+    const firstCallback = vi.fn();
+
+    const first = manager.spawnAndWait(mockPi, mockCtx, "general-purpose", "first", {
+      description: "first",
+    }, firstCallback);
+    const secondId = manager.spawn(mockPi, mockCtx, "general-purpose", "second", {
+      description: "second",
+      isBackground: true,
+    });
+
+    expect(firstCallback).toHaveBeenCalledTimes(1);
+    await manager.getRecord(secondId)!.promise;
+    finishFirst?.({
+      responseText: "first",
+      session: mockSession(),
+      aborted: false,
+      steered: false,
+    });
+    await first;
+  });
+
+  it("onComplete fires on the error path with resultConsumed=true", async () => {
+    // The .then path is covered by the lifecycle-symmetry test above; this guards
+    // the .catch path which lacks try/catch around onComplete (a known asymmetry).
+    let completedRecord: AgentRecord | undefined;
+    manager = new AgentManager((r) => { completedRecord = r; });
+    vi.mocked(runAgent).mockRejectedValue(new Error("agent failed"));
+
+    const { record } = await manager.spawnAndWait(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+    });
+
+    expect(completedRecord).toBeDefined();
+    expect(completedRecord!.status).toBe("error");
+    expect(completedRecord!.resultConsumed).toBe(true);
+    expect(record).toBe(completedRecord);
+  });
+});
+
+describe("AgentManager — nested runtime propagation", () => {
+  let manager: AgentManager;
+
+  afterEach(() => manager?.dispose());
+
+  it("stores nesting metadata and passes the owning manager/runtime to runAgent", async () => {
+    resolvedRun();
+    manager = new AgentManager();
+    const id = manager.spawn(mockPi, mockCtx, "scout", "nested", {
+      description: "nested",
+      isBackground: true,
+      depth: 2,
+      parentAgentId: "parent-1",
+      maxSubagentDepth: 3,
+      configCwd: "/trusted/config",
+    });
+    await manager.getRecord(id)!.promise;
+
+    expect(manager.getRecord(id)).toEqual(expect.objectContaining({
+      depth: 2,
+      parentAgentId: "parent-1",
+      maxSubagentDepth: 3,
+    }));
+    expect(runAgent).toHaveBeenLastCalledWith(
+      mockCtx,
+      "scout",
+      "nested",
+      expect.objectContaining({
+        configCwd: "/trusted/config",
+        nestedRuntime: {
+          manager,
+          parentAgentId: id,
+          depth: 2,
+          maxSubagentDepth: 3,
+        },
+      }),
+    );
+  });
+
+  it("defaults top-level subagents to depth one", async () => {
+    resolvedRun();
+    manager = new AgentManager();
+    const id = manager.spawn(mockPi, mockCtx, "scout", "top", {
+      description: "top",
+      isBackground: true,
+    });
+    await manager.getRecord(id)!.promise;
+
+    expect(manager.getRecord(id)?.depth).toBe(1);
+    expect(vi.mocked(runAgent).mock.lastCall?.[3].nestedRuntime).toEqual(expect.objectContaining({
+      parentAgentId: id,
+      depth: 1,
+    }));
+  });
+
+  it("starts a nested background child even when the concurrency pool is full", async () => {
+    // A parent holding the only slot and waiting on its own child would
+    // otherwise deadlock: the child can never be drained from the queue.
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    manager = new AgentManager(undefined, 1);
+
+    const parentId = manager.spawn(mockPi, mockCtx, "general-purpose", "parent", {
+      description: "parent",
+      isBackground: true,
+    });
+    const childId = manager.spawn(mockPi, mockCtx, "scout", "child", {
+      description: "child",
+      isBackground: true,
+      depth: 2,
+      parentAgentId: parentId,
+    });
+    // A second top-level background agent still queues — the pool is untouched.
+    const siblingId = manager.spawn(mockPi, mockCtx, "general-purpose", "sibling", {
+      description: "sibling",
+      isBackground: true,
+    });
+
+    expect(manager.getRecord(childId)?.status).toBe("running");
+    expect(manager.getRecord(siblingId)?.status).toBe("queued");
+  });
+
+  it("aborts owned children when the parent settles", async () => {
+    let finishParent: ((value: any) => void) | undefined;
+    // Children settle on abort, as a real run does when its signal fires.
+    const abortable = (_ctx: any, _type: any, _prompt: any, opts: any) =>
+      new Promise<any>(resolve => {
+        opts.signal?.addEventListener("abort", () =>
+          resolve({ responseText: "", session: mockSession(), aborted: true, steered: false }),
+        );
+      });
+    vi.mocked(runAgent)
+      .mockImplementationOnce(() => new Promise(resolve => { finishParent = resolve; }))
+      .mockImplementation(abortable as any);
+    manager = new AgentManager();
+
+    const parentId = manager.spawn(mockPi, mockCtx, "general-purpose", "parent", {
+      description: "parent",
+      isBackground: true,
+    });
+    const runningChild = manager.spawn(mockPi, mockCtx, "scout", "child", {
+      description: "child",
+      isBackground: true,
+      depth: 2,
+      parentAgentId: parentId,
+    });
+    const grandchild = manager.spawn(mockPi, mockCtx, "scout", "grandchild", {
+      description: "grandchild",
+      isBackground: true,
+      depth: 3,
+      parentAgentId: runningChild,
+    });
+
+    finishParent?.({ responseText: "done", session: mockSession(), aborted: false, steered: false });
+    await manager.getRecord(parentId)!.promise;
+
+    expect(manager.getRecord(runningChild)?.status).toBe("stopped");
+    // The child's own settle path stops the generation below it.
+    await manager.getRecord(runningChild)!.promise;
+    expect(manager.getRecord(grandchild)?.status).toBe("stopped");
+  });
+
+  it("aborts children spawned during a resumed turn", async () => {
+    // The spawn settle path already ran, so only resume() can stop what the
+    // resumed turn launched — otherwise the child runs on, invisible.
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: "done",
+      session: mockSession(),
+      aborted: false,
+      steered: false,
+    });
+    manager = new AgentManager();
+
+    const parentId = manager.spawn(mockPi, mockCtx, "general-purpose", "parent", {
+      description: "parent",
+      isBackground: true,
+    });
+    await manager.getRecord(parentId)!.promise;
+
+    let childId = "";
+    vi.mocked(resumeAgent).mockImplementation(async () => {
+      vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+      childId = manager.spawn(mockPi, mockCtx, "scout", "child", {
+        description: "child",
+        isBackground: true,
+        depth: 2,
+        parentAgentId: parentId,
+      });
+      return { text: "resumed" } as any;
+    });
+
+    await manager.resume(parentId, "keep going");
+
+    expect(manager.getRecord(childId)?.status).toBe("stopped");
   });
 });
 
@@ -236,6 +495,57 @@ describe("AgentManager — Bug 3 clearCompleted", () => {
     manager.clearCompleted();
     expect(manager.getRecord(id)).toBeUndefined();
   });
+
+  it("clearCompleted(true) preserves completed records with resultConsumed=false", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+    });
+    await manager.getRecord(id)!.promise;
+    expect(manager.getRecord(id)!.status).toBe("completed");
+    expect(manager.getRecord(id)!.resultConsumed).toBeFalsy();
+
+    manager.clearCompleted(true);
+    expect(manager.getRecord(id)).toBeDefined();
+  });
+
+  it("clearCompleted(true) removes completed records with resultConsumed=true", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+    });
+    const record = manager.getRecord(id)!;
+    await record.promise;
+    record.resultConsumed = true;
+
+    manager.clearCompleted(true);
+    expect(manager.getRecord(id)).toBeUndefined();
+  });
+
+  it("clearCompleted(true) still removes running=false queued=false records when resultConsumed=false for error status", async () => {
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockRejectedValue(new Error("boom"));
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+    });
+    await manager.getRecord(id)!.promise;
+    expect(manager.getRecord(id)!.status).toBe("error");
+    expect(manager.getRecord(id)!.resultConsumed).toBeFalsy();
+
+    // Error records with unread results are also preserved — the LLM should
+    // be able to read the error message via get_subagent_result before the
+    // record is evicted.
+    manager.clearCompleted(true);
+    expect(manager.getRecord(id)).toBeDefined();
+  });
 });
 
 // Eager init removes the optional/required asymmetry that previously required
@@ -345,7 +655,7 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
     vi.mocked(resumeMock).mockImplementation(async (_session, _prompt, opts: any) => {
       opts.onAssistantUsage?.({ input: 70, output: 30, cacheWrite: 5 });
       opts.onCompaction?.({ reason: "overflow", tokensBefore: 999 });
-      return "second";
+      return { text: "second" };
     });
 
     await manager.resume(id, "more");
@@ -380,5 +690,537 @@ describe("AgentManager — isolation: worktree fails loud, no silent fallback", 
     expect(manager.listAgents()).toEqual([]);
     // runAgent never invoked — strict, no silent fallback
     expect(runAgent).not.toHaveBeenCalled();
+  });
+});
+
+describe("AgentManager — SpawnOptions.cwd passthrough (#96)", () => {
+  let manager: AgentManager;
+  afterEach(() => manager?.dispose());
+
+  it("passes cwd to runAgent as the working dir, parent cwd as configCwd", async () => {
+    resolvedRun();
+    manager = new AgentManager();
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      cwd: "/", // absolute and always exists
+    });
+    await manager.getRecord(id)!.promise;
+
+    expect(runAgent).toHaveBeenCalledWith(
+      mockCtx, "general-purpose", "test",
+      expect.objectContaining({ cwd: "/", configCwd: "/tmp" }),
+    );
+  });
+
+  it("without cwd, configCwd stays unset — existing behavior untouched", async () => {
+    // mockClear + lastCall: toHaveBeenCalledWith would scan the file's whole
+    // accumulated call history, where earlier no-cwd spawns already match.
+    vi.mocked(runAgent).mockClear();
+    resolvedRun();
+    manager = new AgentManager();
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+    });
+    await manager.getRecord(id)!.promise;
+
+    const opts = vi.mocked(runAgent).mock.lastCall![3];
+    expect(opts.cwd).toBeUndefined();
+    expect(opts.configCwd).toBeUndefined();
+  });
+
+  it("cwd: null (RPC 'unset') behaves exactly like omitting cwd", async () => {
+    vi.mocked(runAgent).mockClear();
+    resolvedRun();
+    manager = new AgentManager();
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      cwd: null as any,
+    });
+    await manager.getRecord(id)!.promise;
+
+    const opts = vi.mocked(runAgent).mock.lastCall![3];
+    expect(opts.cwd).toBeUndefined();
+    expect(opts.configCwd).toBeUndefined();
+  });
+
+  it("cwd + isolation: worktree — worktree created FROM cwd, session runs at the copy's workPath, cleanup targets cwd's repo", async () => {
+    const { createWorktree, cleanupWorktree } = await import("../src/worktree.js");
+    vi.mocked(createWorktree).mockReturnValueOnce({
+      path: "/wt/copy", branch: "pi-agent-x", baseSha: "abc", workPath: "/wt/copy/packages/api",
+    });
+    resolvedRun();
+
+    manager = new AgentManager();
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      cwd: "/",
+      isolation: "worktree",
+    });
+    await manager.getRecord(id)!.promise;
+
+    expect(createWorktree).toHaveBeenCalledWith("/", id);
+    // Worktree wins for the working dir — at workPath, so subdirectory scoping
+    // survives isolation. Config still anchored to the parent.
+    expect(runAgent).toHaveBeenCalledWith(
+      mockCtx, "general-purpose", "test",
+      expect.objectContaining({ cwd: "/wt/copy/packages/api", configCwd: "/tmp", worktreeBase: "/" }),
+    );
+    expect(cleanupWorktree).toHaveBeenCalledWith("/", expect.anything(), "test");
+  });
+
+  it("plain worktree (no cwd) keeps the historical root working dir even when workPath differs", async () => {
+    // Parent session sitting in a repo subdirectory: workPath would point at
+    // the copied subdir. Without SpawnOptions.cwd the agent must stay at the
+    // copy's root — moving it would also move .pi config discovery.
+    const { createWorktree } = await import("../src/worktree.js");
+    vi.mocked(createWorktree).mockReturnValueOnce({
+      path: "/wt/copy", branch: "pi-agent-x", baseSha: "abc", workPath: "/wt/copy/sub/dir",
+    });
+    vi.mocked(runAgent).mockClear();
+    resolvedRun();
+
+    manager = new AgentManager();
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isolation: "worktree",
+    });
+    await manager.getRecord(id)!.promise;
+
+    const opts = vi.mocked(runAgent).mock.lastCall![3];
+    expect(opts.cwd).toBe("/wt/copy");
+    expect(opts.configCwd).toBeUndefined();
+    // The copy came from the parent session's cwd — that is what the prompt
+    // must name as off-limits (#187).
+    expect(opts.worktreeBase).toBe("/tmp");
+  });
+
+  it("no worktree — no worktreeBase, so no isolation block in the prompt", async () => {
+    vi.mocked(runAgent).mockClear();
+    resolvedRun();
+
+    manager = new AgentManager();
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", { description: "test" });
+    await manager.getRecord(id)!.promise;
+
+    expect(vi.mocked(runAgent).mock.lastCall![3].worktreeBase).toBeUndefined();
+  });
+
+  it("relative cwd throws immediately; no orphan record", () => {
+    vi.mocked(runAgent).mockClear();
+    manager = new AgentManager();
+    expect(() => manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      cwd: "relative/path",
+    })).toThrow(/absolute path/);
+    expect(manager.listAgents()).toEqual([]);
+    expect(runAgent).not.toHaveBeenCalled();
+  });
+
+  it("nonexistent cwd throws immediately; no orphan record", () => {
+    vi.mocked(runAgent).mockClear();
+    manager = new AgentManager();
+    expect(() => manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      cwd: "/nonexistent-pi-subagents-test-dir",
+    })).toThrow(/does not exist/);
+    expect(manager.listAgents()).toEqual([]);
+    expect(runAgent).not.toHaveBeenCalled();
+  });
+
+  it("cwd pointing at a regular file throws a curated 'not a directory' error", () => {
+    vi.mocked(runAgent).mockClear();
+    manager = new AgentManager();
+    expect(() => manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      cwd: fileURLToPath(import.meta.url), // this test file: absolute, exists, not a directory
+    })).toThrow(/not a directory/);
+    expect(manager.listAgents()).toEqual([]);
+    expect(runAgent).not.toHaveBeenCalled();
+  });
+
+  it("non-string cwd (RPC junk) throws the curated error, not a TypeError from path internals", () => {
+    vi.mocked(runAgent).mockClear();
+    manager = new AgentManager();
+    expect(() => manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      cwd: 123 as any,
+    })).toThrow(/must be an absolute path/);
+    expect(manager.listAgents()).toEqual([]);
+  });
+});
+
+describe("AgentManager — abort() state machine", () => {
+  let manager: AgentManager;
+  afterEach(() => manager?.dispose());
+
+  it("returns false for an unknown id (no record, no side-effects)", () => {
+    manager = new AgentManager();
+    expect(manager.abort("does-not-exist")).toBe(false);
+  });
+
+  it("removes a queued agent from the queue and marks it stopped", () => {
+    // Concurrency=1: the second background spawn queues behind the first
+    manager = new AgentManager(undefined, 1);
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+
+    manager.spawn(mockPi, mockCtx, "X", "blocker", { description: "block", isBackground: true });
+    const queuedId = manager.spawn(mockPi, mockCtx, "Y", "queued", {
+      description: "q",
+      isBackground: true,
+    });
+    const queuedRecord = manager.getRecord(queuedId)!;
+    expect(queuedRecord.status).toBe("queued");
+
+    expect(manager.abort(queuedId)).toBe(true);
+    expect(queuedRecord.status).toBe("stopped");
+    expect(queuedRecord.completedAt).toBeGreaterThan(0);
+    // Aborting again is a no-op — status is no longer "queued" or "running"
+    expect(manager.abort(queuedId)).toBe(false);
+  });
+
+  it("aborts a running agent by firing its AbortController and setting status='stopped'", () => {
+    manager = new AgentManager();
+    let receivedSignal: AbortSignal | undefined;
+    vi.mocked(runAgent).mockImplementation((_ctx, _type, _prompt, opts) => {
+      receivedSignal = (opts as { signal?: AbortSignal })?.signal;
+      return new Promise(() => {});
+    });
+
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", {
+      description: "r",
+      isBackground: true,
+    });
+    const record = manager.getRecord(id)!;
+    expect(record.status).toBe("running");
+    expect(receivedSignal?.aborted).toBe(false);
+
+    expect(manager.abort(id)).toBe(true);
+    expect(record.status).toBe("stopped");
+    expect(record.completedAt).toBeGreaterThan(0);
+    expect(receivedSignal?.aborted).toBe(true);
+  });
+
+  it("returns false (and does not change status) for an already-completed agent", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", {
+      description: "x",
+      isBackground: false,
+    });
+    await manager.getRecord(id)?.promise;
+    expect(manager.getRecord(id)?.status).toBe("completed");
+
+    expect(manager.abort(id)).toBe(false);
+    expect(manager.getRecord(id)?.status).toBe("completed");
+  });
+
+  it("a user abort survives the agent settling — stays 'stopped', never 'completed'", async () => {
+    // Guards the `if (record.status !== "stopped")` check in the completion
+    // handler: after a user abort, runAgent's promise still settles (here with
+    // aborted:false, as a non-cooperative mock would), and must NOT flip the
+    // user-stopped status back to "completed" — otherwise the parent agent
+    // would read the partial output as a finished result.
+    manager = new AgentManager();
+    let resolveRun!: (v: unknown) => void;
+    vi.mocked(runAgent).mockImplementation(() => new Promise((res) => { resolveRun = res as (v: unknown) => void; }));
+
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "r", isBackground: true });
+    const record = manager.getRecord(id)!;
+    expect(record.status).toBe("running");
+
+    expect(manager.abort(id)).toBe(true);
+    expect(record.status).toBe("stopped");
+
+    // The agent loop ends and the promise settles "normally".
+    resolveRun({ responseText: "partial output", session: mockSession(), aborted: false, steered: false });
+    await record.promise;
+
+    expect(record.status).toBe("stopped");        // not overwritten to "completed"
+    expect(record.result).toBe("partial output"); // partial result still captured
+  });
+});
+
+// Regression for #44: ESC during a foreground Agent call must propagate to
+// the child. Pi delivers parent abort via AbortSignal; the manager wires the
+// signal's "abort" event to this.abort(id).
+describe("AgentManager — steer()", () => {
+  let manager: AgentManager;
+  afterEach(() => manager?.dispose());
+
+  it("returns false for an unknown id", () => {
+    manager = new AgentManager();
+    expect(manager.steer("nope", "hi")).toBe(false);
+  });
+
+  it("delivers to a live session via session.steer()", () => {
+    manager = new AgentManager();
+    const steer = vi.fn(() => Promise.resolve());
+    let captured: ((s: any) => void) | undefined;
+    vi.mocked(runAgent).mockImplementation((_ctx, _type, _prompt, opts) => {
+      captured = (opts as any)?.onSessionCreated;
+      return new Promise(() => {});
+    });
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "r", isBackground: true });
+    // Simulate the session becoming ready.
+    captured?.({ steer, dispose: vi.fn() });
+
+    expect(manager.steer(id, "go left")).toBe(true);
+    expect(steer).toHaveBeenCalledWith("go left");
+  });
+
+  it("queues onto pendingSteers when the session isn't ready yet", () => {
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "r", isBackground: true });
+    const record = manager.getRecord(id)!;
+    record.session = undefined; // not ready
+
+    expect(manager.steer(id, "first")).toBe(true);
+    expect(manager.steer(id, "second")).toBe(true);
+    expect(record.pendingSteers).toEqual(["first", "second"]);
+  });
+
+  it("refuses to steer an agent that is no longer running", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x", isBackground: false });
+    await manager.getRecord(id)?.promise;
+    expect(manager.getRecord(id)?.status).toBe("completed");
+    expect(manager.steer(id, "too late")).toBe(false);
+  });
+});
+
+describe("AgentManager — parent abort signal forwarding (#44)", () => {
+  let manager: AgentManager;
+  afterEach(() => manager?.dispose());
+
+  it("aborts the child when the parent signal aborts", () => {
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+
+    const parent = new AbortController();
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", {
+      description: "x",
+      isBackground: false,
+      signal: parent.signal,
+    });
+    const record = manager.getRecord(id)!;
+    expect(record.status).toBe("running");
+
+    parent.abort();
+    expect(record.status).toBe("stopped");
+    expect(record.completedAt).toBeGreaterThan(0);
+  });
+});
+
+describe("AgentManager — listAgents() ordering", () => {
+  let manager: AgentManager;
+  afterEach(() => manager?.dispose());
+
+  it("returns records sorted by startedAt descending (most recent first)", () => {
+    manager = new AgentManager();
+    resolvedRun();
+
+    const a = manager.spawn(mockPi, mockCtx, "X", "1", { description: "a" });
+    const b = manager.spawn(mockPi, mockCtx, "X", "2", { description: "b" });
+    const c = manager.spawn(mockPi, mockCtx, "X", "3", { description: "c" });
+
+    // Force deterministic startedAt — Date.now() can collide on fast runs
+    manager.getRecord(a)!.startedAt = 100;
+    manager.getRecord(b)!.startedAt = 200;
+    manager.getRecord(c)!.startedAt = 300;
+
+    expect(manager.listAgents().map((r) => r.id)).toEqual([c, b, a]);
+  });
+});
+
+describe("AgentManager — abortAll", () => {
+  let manager: AgentManager;
+  afterEach(() => manager?.dispose());
+
+  it("stops both queued and running agents and returns the total count", () => {
+    manager = new AgentManager(undefined, 1);
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+
+    const running = manager.spawn(mockPi, mockCtx, "X", "r", {
+      description: "r",
+      isBackground: true,
+    });
+    const queued = manager.spawn(mockPi, mockCtx, "Y", "q", {
+      description: "q",
+      isBackground: true,
+    });
+    expect(manager.getRecord(running)?.status).toBe("running");
+    expect(manager.getRecord(queued)?.status).toBe("queued");
+
+    expect(manager.abortAll()).toBe(2);
+    expect(manager.getRecord(running)?.status).toBe("stopped");
+    expect(manager.getRecord(queued)?.status).toBe("stopped");
+    expect(manager.hasRunning()).toBe(false);
+  });
+
+  it("returns 0 when there are no running or queued agents", () => {
+    manager = new AgentManager();
+    expect(manager.abortAll()).toBe(0);
+  });
+});
+
+describe("AgentManager — hasRunning", () => {
+  let manager: AgentManager;
+  afterEach(() => manager?.dispose());
+
+  it("is true while a background agent is running, false after it completes", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+
+    expect(manager.hasRunning()).toBe(false);
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", {
+      description: "x",
+      isBackground: true,
+    });
+    expect(manager.hasRunning()).toBe(true);
+
+    await manager.getRecord(id)?.promise;
+    expect(manager.hasRunning()).toBe(false);
+  });
+
+  it("is true when an agent is queued behind the concurrency limit", () => {
+    manager = new AgentManager(undefined, 1);
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+
+    manager.spawn(mockPi, mockCtx, "X", "r", { description: "r", isBackground: true });
+    manager.spawn(mockPi, mockCtx, "Y", "q", { description: "q", isBackground: true });
+    expect(manager.hasRunning()).toBe(true);
+  });
+});
+
+describe("AgentManager — runAgent rejection leaves the record visible with error status", () => {
+  let manager: AgentManager;
+  afterEach(() => manager?.dispose());
+
+  it("sets status='error', captures the error message, and stamps completedAt", async () => {
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockRejectedValue(new Error("boom"));
+
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", {
+      description: "x",
+      isBackground: false,
+    });
+    const record = manager.getRecord(id)!;
+    await record.promise;
+
+    expect(record.status).toBe("error");
+    expect(record.error).toBe("boom");
+    expect(record.completedAt).toBeGreaterThan(0);
+  });
+});
+
+// #144 — a run that RESOLVES with a failed final turn (pi never rejects on
+// retry exhaustion) must map to status "error", not "completed".
+describe("AgentManager — resolved runs with a failed final turn map to error (#144)", () => {
+  let manager: AgentManager;
+  afterEach(() => manager?.dispose());
+
+  const failedRun = (failure: string, responseText = "") =>
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText,
+      session: mockSession(),
+      aborted: false,
+      steered: false,
+      failure,
+    } as any);
+
+  it("sets status='error' and captures the provider message", async () => {
+    manager = new AgentManager();
+    failedRun("retries exhausted: 529 overloaded");
+
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x", isBackground: true });
+    const record = manager.getRecord(id)!;
+    await record.promise;
+
+    expect(record.status).toBe("error");
+    expect(record.error).toBe("retries exhausted: 529 overloaded");
+    expect(record.completedAt).toBeGreaterThan(0);
+  });
+
+  it("keeps earlier-turn text available as result context, but never as a clean completion", async () => {
+    manager = new AgentManager();
+    failedRun("provider died", "partial progress from an earlier turn");
+
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x", isBackground: true });
+    const record = manager.getRecord(id)!;
+    await record.promise;
+
+    expect(record.status).toBe("error");
+    expect(record.result).toBe("partial progress from an earlier turn");
+  });
+
+  it("onComplete sees the error status (routes to subagents:failed in the host)", async () => {
+    let completed: AgentRecord | undefined;
+    manager = new AgentManager((r) => { completed = r; });
+    failedRun("boom");
+
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x", isBackground: true });
+    await manager.getRecord(id)!.promise;
+
+    expect(completed?.status).toBe("error");
+  });
+
+  it("an external stop still wins over a late failure resolution", async () => {
+    manager = new AgentManager();
+    let resolveRun: ((v: unknown) => void) | undefined;
+    const session = mockSession();
+    vi.mocked(runAgent).mockImplementation(() => new Promise((r) => { resolveRun = r; }));
+
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x", isBackground: true });
+    const record = manager.getRecord(id)!;
+    record.status = "stopped"; // external abort() path
+    resolveRun!({ responseText: "", session, aborted: false, steered: false, failure: "late error" });
+    await record.promise;
+
+    expect(record.status).toBe("stopped");
+    expect(record.error).toBeUndefined();
+  });
+
+  it("resume(): a failed final turn on the resumed prompt maps to error too", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x", isBackground: true });
+    const record = manager.getRecord(id)!;
+    await record.promise;
+    expect(record.status).toBe("completed");
+
+    const { resumeAgent: resumeMock } = await import("../src/agent-runner.js");
+    // resumeAgent bounds its fallback to this invocation, so a failed empty
+    // resume yields text "" — never the prior turn's answer (#144 root-fix).
+    vi.mocked(resumeMock).mockResolvedValue({
+      text: "",
+      failure: "retries exhausted on resume",
+    });
+
+    await manager.resume(id, "more");
+
+    expect(record.status).toBe("error");
+    expect(record.error).toBe("retries exhausted on resume");
+    expect(record.result).toBe(""); // no stale prior answer
+  });
+
+  it("resume(): partial text produced before the failure is kept as result", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x", isBackground: true });
+    const record = manager.getRecord(id)!;
+    await record.promise;
+
+    const { resumeAgent: resumeMock } = await import("../src/agent-runner.js");
+    vi.mocked(resumeMock).mockResolvedValue({
+      text: "new partial progress",
+      failure: "provider died mid-turn",
+    });
+
+    await manager.resume(id, "more");
+
+    expect(record.status).toBe("error");
+    expect(record.result).toBe("new partial progress"); // salvageable, this-run text
   });
 });

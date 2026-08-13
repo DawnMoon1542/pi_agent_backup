@@ -10,18 +10,27 @@ export interface PromptExtras {
   memoryBlock?: string;
   /** Preloaded skill contents to inject. */
   skillBlocks?: { name: string; content: string }[];
+  /**
+   * Parent directory the worktree copy was created from. Set only for
+   * `isolation: "worktree"` spawns — triggers the block that tells the agent
+   * to stay in the copy.
+   */
+  worktreeBase?: string;
 }
 
 /**
  * Build the system prompt for an agent from its config.
  *
  * - "replace" mode: env header + config.systemPrompt (full control, no parent identity)
- * - "append" mode: env header + parent system prompt + sub-agent context + config.systemPrompt
+ * - "append" mode: parent system prompt + sub-agent context + env header + config.systemPrompt
  * - "append" with empty systemPrompt: pure parent clone
  *
- * Both modes prepend an `<active_agent name="${config.name}"/>` tag so downstream
+ * Both modes include an `<active_agent name="${config.name}"/>` tag so downstream
  * extensions (e.g. permission/policy systems) can resolve per-agent policy
- * inside the child session by parsing the system prompt.
+ * inside the child session by parsing the system prompt. In replace mode the tag
+ * is prepended; in append mode it follows the shared inherited content so the
+ * parent prompt forms an identical, cacheable byte prefix with the parent
+ * session (the LLM's KV cache can then reuse those tokens across every spawn).
  *
  * @param parentSystemPrompt  The parent agent's effective system prompt (for append mode).
  * @param extras  Optional extra sections to inject (memory, preloaded skills).
@@ -39,6 +48,17 @@ export function buildAgentPrompt(
 Working directory: ${cwd}
 ${env.isGitRepo ? `Git repository: yes\nBranch: ${env.branch}` : "Not a git repository"}
 Platform: ${env.platform}`;
+
+  // A worktree agent is told its cwd twice: by the env block above (the copy)
+  // and by whatever names the main checkout — the inherited parent prompt in
+  // append mode, or the task prompt in either mode. It follows the latter and
+  // works in the shared tree (#187), so resolve the contradiction explicitly.
+  const worktreeBlock = extras?.worktreeBase
+    ? `\n\n<worktree_isolation>
+Your working directory is an isolated git worktree copy of ${extras.worktreeBase}.
+Work only inside it — never in ${extras.worktreeBase}, even if other instructions name that path as your working directory.
+</worktree_isolation>`
+    : "";
 
   // Build optional extras suffix
   const extraSections: string[] = [];
@@ -72,7 +92,12 @@ You are operating as a sub-agent invoked to handle a specific task.
       ? `\n\n<agent_instructions>\n${config.systemPrompt}\n</agent_instructions>`
       : "";
 
-    return activeAgentTag + envBlock + "\n\n<inherited_system_prompt>\n" + identity + "\n</inherited_system_prompt>\n\n" + bridge + customSection + extrasSuffix;
+    // Place shared/stable content first so the LLM's KV cache can reuse the
+    // inherited prefix across all subagent invocations. The parent prompt is
+    // placed verbatim (no wrapper tag) so it forms an identical byte prefix
+    // with the parent session, maximising KV cache hits. The <active_agent>
+    // tag and env block vary per call and are placed after the cached prefix.
+    return identity + "\n\n" + bridge + "\n\n" + activeAgentTag + envBlock + worktreeBlock + customSection + extrasSuffix;
   }
 
   // "replace" mode — env header + the config's full system prompt
@@ -81,7 +106,7 @@ You have been invoked to handle a specific task autonomously.
 
 ${envBlock}`;
 
-  return activeAgentTag + replaceHeader + "\n\n" + config.systemPrompt + extrasSuffix;
+  return activeAgentTag + replaceHeader + worktreeBlock + "\n\n" + config.systemPrompt + extrasSuffix;
 }
 
 /** Fallback base prompt when parent system prompt is unavailable in append mode. */

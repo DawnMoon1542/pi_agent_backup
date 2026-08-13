@@ -89,6 +89,7 @@ describe("settings persistence", () => {
       graceTurns: 3,
       defaultJoinMode: "smart" as const,
       schedulingEnabled: false,
+      toolDescriptionMode: "compact" as const,
     };
     saveSettings(settings, projectDir);
     expect(loadSettings(projectDir)).toEqual(settings);
@@ -104,6 +105,33 @@ describe("settings persistence", () => {
     // Absence — caller's "use default" signal — must not become a stored false.
     saveSettings({}, projectDir);
     expect(loadSettings(projectDir)).toEqual({});
+  });
+
+  it("round-trips fleetView (true and false); keeps boolean, drops non-boolean", () => {
+    saveSettings({ fleetView: false }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ fleetView: false });
+    saveSettings({ fleetView: true }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ fleetView: true });
+    writeProject({ fleetView: "on" } as any);
+    expect(loadSettings(projectDir)).toEqual({}); // non-boolean dropped
+  });
+
+  it("round-trips widgetMode; keeps valid values, drops invalid", () => {
+    saveSettings({ widgetMode: "off" }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ widgetMode: "off" });
+    saveSettings({ widgetMode: "background" }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ widgetMode: "background" });
+    writeProject({ widgetMode: "sideways" } as any);
+    expect(loadSettings(projectDir)).toEqual({}); // invalid value dropped
+  });
+
+  it("round-trips outputTranscript; drops non-boolean", () => {
+    saveSettings({ outputTranscript: false }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ outputTranscript: false });
+    saveSettings({ outputTranscript: true }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ outputTranscript: true });
+    writeProject({ outputTranscript: "no" } as any);
+    expect(loadSettings(projectDir)).toEqual({}); // non-boolean dropped
   });
 
   it("sanitize drops non-boolean schedulingEnabled silently", async () => {
@@ -183,6 +211,47 @@ describe("settings persistence", () => {
       expect(loadSettings(projectDir)).toEqual({});
     });
 
+    it("keeps maxSubagentDepth 0 (nesting off) but drops negative, fractional, and over-ceiling values", () => {
+      writeProject({ maxSubagentDepth: 0 });
+      expect(loadSettings(projectDir)).toEqual({ maxSubagentDepth: 0 });
+      writeProject({ maxSubagentDepth: -1 });
+      expect(loadSettings(projectDir)).toEqual({});
+      writeProject({ maxSubagentDepth: 1.5 });
+      expect(loadSettings(projectDir)).toEqual({});
+      writeProject({ maxSubagentDepth: 17 });
+      expect(loadSettings(projectDir)).toEqual({});
+    });
+
+    it("accepts `none` and `false` as the disabled fallback, nothing else", () => {
+      // Only the boolean needs an alias: it would otherwise be dropped, leaving
+      // the PERMISSIVE default while the author believed strict was on. Every
+      // string stays an agent name, so a mistaken "off" fails loudly at dispatch
+      // instead of meaning one thing here and another in the resolver.
+      for (const spelling of ["none", "NONE", " none ", false]) {
+        writeProject({ fallbackSubagent: spelling });
+        expect(loadSettings(projectDir).fallbackSubagent?.toLowerCase()).toBe("none");
+      }
+      writeProject({ fallbackSubagent: "off" });
+      expect(loadSettings(projectDir)).toEqual({ fallbackSubagent: "off" });
+    });
+
+    it("drops values that aren't a string or `false`, without coercing them", () => {
+      // String(["none"]) is "none" — coercing would silently enable strict mode.
+      for (const junk of [["none"], null, 42, true, {}]) {
+        writeProject({ fallbackSubagent: junk });
+        expect(loadSettings(projectDir)).toEqual({});
+      }
+    });
+
+    it("keeps a named fallback agent and drops non-strings", () => {
+      writeProject({ fallbackSubagent: "  my-router  " });
+      expect(loadSettings(projectDir)).toEqual({ fallbackSubagent: "my-router" });
+      writeProject({ fallbackSubagent: 42 });
+      expect(loadSettings(projectDir)).toEqual({});
+      writeProject({ fallbackSubagent: "   " });
+      expect(loadSettings(projectDir)).toEqual({});
+    });
+
     it("drops invalid defaultJoinMode values", () => {
       writeProject({ defaultJoinMode: "invalid" });
       expect(loadSettings(projectDir)).toEqual({});
@@ -197,6 +266,68 @@ describe("settings persistence", () => {
         writeProject({ defaultJoinMode: mode });
         expect(loadSettings(projectDir)).toEqual({ defaultJoinMode: mode });
       }
+    });
+
+    it("accepts scopeModels boolean (true and false)", () => {
+      writeProject({ scopeModels: true });
+      expect(loadSettings(projectDir)).toEqual({ scopeModels: true });
+      writeProject({ scopeModels: false });
+      expect(loadSettings(projectDir)).toEqual({ scopeModels: false });
+    });
+
+    it("accepts strictAgentFiles boolean (true and false)", () => {
+      writeProject({ strictAgentFiles: true });
+      expect(loadSettings(projectDir)).toEqual({ strictAgentFiles: true });
+      writeProject({ strictAgentFiles: false });
+      expect(loadSettings(projectDir)).toEqual({ strictAgentFiles: false });
+    });
+
+    it("drops non-boolean strictAgentFiles", () => {
+      writeProject({ strictAgentFiles: "yes" });
+      expect(loadSettings(projectDir).strictAgentFiles).toBeUndefined();
+      writeProject({ strictAgentFiles: 1 });
+      expect(loadSettings(projectDir).strictAgentFiles).toBeUndefined();
+    });
+
+    it("drops non-boolean scopeModels", () => {
+      writeProject({ scopeModels: "yes" });
+      expect(loadSettings(projectDir).scopeModels).toBeUndefined();
+      writeProject({ scopeModels: 1 });
+      expect(loadSettings(projectDir).scopeModels).toBeUndefined();
+      writeProject({ scopeModels: null });
+      expect(loadSettings(projectDir).scopeModels).toBeUndefined();
+    });
+
+    it("accepts disableDefaultAgents boolean (true and false)", () => {
+      writeProject({ disableDefaultAgents: true });
+      expect(loadSettings(projectDir)).toEqual({ disableDefaultAgents: true });
+      writeProject({ disableDefaultAgents: false });
+      expect(loadSettings(projectDir)).toEqual({ disableDefaultAgents: false });
+    });
+
+    it("drops non-boolean disableDefaultAgents", () => {
+      writeProject({ disableDefaultAgents: "yes" });
+      expect(loadSettings(projectDir).disableDefaultAgents).toBeUndefined();
+      writeProject({ disableDefaultAgents: 1 });
+      expect(loadSettings(projectDir).disableDefaultAgents).toBeUndefined();
+      writeProject({ disableDefaultAgents: null });
+      expect(loadSettings(projectDir).disableDefaultAgents).toBeUndefined();
+    });
+
+    it("accepts all valid toolDescriptionMode values", () => {
+      for (const mode of ["full", "compact", "custom"] as const) {
+        writeProject({ toolDescriptionMode: mode });
+        expect(loadSettings(projectDir)).toEqual({ toolDescriptionMode: mode });
+      }
+    });
+
+    it("drops invalid toolDescriptionMode", () => {
+      writeProject({ toolDescriptionMode: "tiny" });
+      expect(loadSettings(projectDir).toolDescriptionMode).toBeUndefined();
+      writeProject({ toolDescriptionMode: true });
+      expect(loadSettings(projectDir).toolDescriptionMode).toBeUndefined();
+      writeProject({ toolDescriptionMode: null });
+      expect(loadSettings(projectDir).toolDescriptionMode).toBeUndefined();
     });
 
     it("returns {} when the JSON root is not an object (array, string, null)", () => {
@@ -295,6 +426,15 @@ describe("settings persistence", () => {
         setGraceTurns: vi.fn(),
         setDefaultJoinMode: vi.fn(),
         setSchedulingEnabled: vi.fn(),
+        setScopeModels: vi.fn(),
+        setStrictAgentFiles: vi.fn(),
+        setDisableDefaultAgents: vi.fn(),
+        setToolDescriptionMode: vi.fn(),
+        setFleetView: vi.fn(),
+        setWidgetMode: vi.fn(),
+        setOutputTranscript: vi.fn(),
+        setMaxSubagentDepth: vi.fn(),
+        setFallbackSubagent: vi.fn(),
       };
     });
 
@@ -305,18 +445,30 @@ describe("settings persistence", () => {
       expect(appliers.setGraceTurns).not.toHaveBeenCalled();
       expect(appliers.setDefaultJoinMode).not.toHaveBeenCalled();
       expect(appliers.setSchedulingEnabled).not.toHaveBeenCalled();
+      expect(appliers.setScopeModels).not.toHaveBeenCalled();
+      expect(appliers.setDisableDefaultAgents).not.toHaveBeenCalled();
+      expect(appliers.setToolDescriptionMode).not.toHaveBeenCalled();
+    });
+
+    it("applies fallbackSubagent through to the registry", () => {
+      // Without this, deleting the applySettings line for this field leaves the
+      // whole suite green while `subagents.json` silently stops working.
+      applySettings({ fallbackSubagent: "none" }, appliers);
+      expect(appliers.setFallbackSubagent).toHaveBeenCalledWith("none");
     });
 
     it("applies only the fields that are present", () => {
-      applySettings({ maxConcurrent: 4, graceTurns: 3 }, appliers);
+      applySettings({ maxConcurrent: 4, graceTurns: 3, maxSubagentDepth: 1 }, appliers);
       expect(appliers.setMaxConcurrent).toHaveBeenCalledWith(4);
       expect(appliers.setGraceTurns).toHaveBeenCalledWith(3);
+      expect(appliers.setMaxSubagentDepth).toHaveBeenCalledWith(1);
       expect(appliers.setDefaultMaxTurns).not.toHaveBeenCalled();
       expect(appliers.setDefaultJoinMode).not.toHaveBeenCalled();
       expect(appliers.setSchedulingEnabled).not.toHaveBeenCalled();
+      expect(appliers.setScopeModels).not.toHaveBeenCalled();
     });
 
-    it("applies all five fields when all are present", () => {
+    it("applies all fields when all are present", () => {
       applySettings(
         {
           maxConcurrent: 8,
@@ -324,6 +476,11 @@ describe("settings persistence", () => {
           graceTurns: 7,
           defaultJoinMode: "group",
           schedulingEnabled: false,
+          scopeModels: true,
+          disableDefaultAgents: true,
+          toolDescriptionMode: "compact",
+          fleetView: false,
+          widgetMode: "off",
         },
         appliers,
       );
@@ -332,6 +489,55 @@ describe("settings persistence", () => {
       expect(appliers.setGraceTurns).toHaveBeenCalledWith(7);
       expect(appliers.setDefaultJoinMode).toHaveBeenCalledWith("group");
       expect(appliers.setSchedulingEnabled).toHaveBeenCalledWith(false);
+      expect(appliers.setScopeModels).toHaveBeenCalledWith(true);
+      expect(appliers.setStrictAgentFiles).not.toHaveBeenCalled();  // absent from this snapshot
+      expect(appliers.setDisableDefaultAgents).toHaveBeenCalledWith(true);
+      expect(appliers.setToolDescriptionMode).toHaveBeenCalledWith("compact");
+      expect(appliers.setFleetView).toHaveBeenCalledWith(false);
+      expect(appliers.setWidgetMode).toHaveBeenCalledWith("off");
+    });
+
+    it("applies strictAgentFiles; skips it when absent", () => {
+      applySettings({ strictAgentFiles: true }, appliers);
+      expect(appliers.setStrictAgentFiles).toHaveBeenCalledWith(true);
+      applySettings({}, appliers);
+      expect(appliers.setStrictAgentFiles).toHaveBeenCalledTimes(1);
+    });
+
+    it("applies widgetMode; skips it when absent", () => {
+      applySettings({ widgetMode: "off" }, appliers);
+      expect(appliers.setWidgetMode).toHaveBeenCalledWith("off");
+      applySettings({}, appliers);
+      expect(appliers.setWidgetMode).toHaveBeenCalledTimes(1); // absence is "use default"
+    });
+
+    it("applies fleetView (true and false); skips it when absent", () => {
+      applySettings({ fleetView: true }, appliers);
+      expect(appliers.setFleetView).toHaveBeenCalledWith(true);
+      applySettings({}, appliers);
+      expect(appliers.setFleetView).toHaveBeenCalledTimes(1); // absence is "use default"
+    });
+
+    it("applies scopeModels: false", () => {
+      applySettings({ scopeModels: false }, appliers);
+      expect(appliers.setScopeModels).toHaveBeenCalledWith(false);
+    });
+
+    it("applies disableDefaultAgents: false", () => {
+      applySettings({ disableDefaultAgents: false }, appliers);
+      expect(appliers.setDisableDefaultAgents).toHaveBeenCalledWith(false);
+    });
+
+    it("applies toolDescriptionMode", () => {
+      applySettings({ toolDescriptionMode: "full" }, appliers);
+      expect(appliers.setToolDescriptionMode).toHaveBeenCalledWith("full");
+    });
+
+    it("applies outputTranscript (both true and false)", () => {
+      applySettings({ outputTranscript: false }, appliers);
+      expect(appliers.setOutputTranscript).toHaveBeenCalledWith(false);
+      applySettings({ outputTranscript: true }, appliers);
+      expect(appliers.setOutputTranscript).toHaveBeenCalledWith(true);
     });
 
     it("applies defaultMaxTurns: 0 as the explicit unlimited marker", () => {
@@ -387,6 +593,15 @@ describe("settings persistence", () => {
         setGraceTurns: vi.fn(),
         setDefaultJoinMode: vi.fn(),
         setSchedulingEnabled: vi.fn(),
+        setScopeModels: vi.fn(),
+        setStrictAgentFiles: vi.fn(),
+        setDisableDefaultAgents: vi.fn(),
+        setToolDescriptionMode: vi.fn(),
+        setFleetView: vi.fn(),
+        setWidgetMode: vi.fn(),
+        setOutputTranscript: vi.fn(),
+        setMaxSubagentDepth: vi.fn(),
+        setFallbackSubagent: vi.fn(),
       };
     });
 

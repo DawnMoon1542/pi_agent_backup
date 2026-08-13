@@ -60,7 +60,7 @@ describe("buildAgentPrompt", () => {
     const prompt = buildAgentPrompt(config, "/workspace", env, parentPrompt);
     expect(prompt).toContain("parent coding agent with full powers");
     expect(prompt).toContain("<sub_agent_context>");
-    expect(prompt).toContain("<inherited_system_prompt>");
+    expect(prompt).not.toContain("<inherited_system_prompt>");
     expect(prompt).not.toContain("READ-ONLY");
     // Empty systemPrompt means no <agent_instructions> section
     expect(prompt).not.toContain("<agent_instructions>");
@@ -91,7 +91,7 @@ describe("buildAgentPrompt", () => {
     expect(prompt).toContain("/workspace");
     expect(prompt).toContain("parent coding agent with special powers");
     expect(prompt).toContain("<sub_agent_context>");
-    expect(prompt).toContain("<inherited_system_prompt>");
+    expect(prompt).not.toContain("<inherited_system_prompt>");
     expect(prompt).toContain("<agent_instructions>");
     expect(prompt).toContain("Extra custom instructions here.");
   });
@@ -132,7 +132,7 @@ describe("buildAgentPrompt", () => {
     const prompt = buildAgentPrompt(config, "/workspace", env, parentPrompt);
     expect(prompt).toContain("parent coding agent");
     expect(prompt).toContain("<sub_agent_context>");
-    expect(prompt).toContain("<inherited_system_prompt>");
+    expect(prompt).not.toContain("<inherited_system_prompt>");
     expect(prompt).not.toContain("<agent_instructions>");
   });
 
@@ -197,7 +197,7 @@ describe("buildAgentPrompt", () => {
     };
     const prompt = buildAgentPrompt(config, "/workspace", env);
     expect(prompt).toContain("<sub_agent_context>");
-    expect(prompt).toContain("<inherited_system_prompt>");
+    expect(prompt).not.toContain("<inherited_system_prompt>");
     expect(prompt).toContain("Use the read tool instead of cat");
     expect(prompt).toContain("general-purpose coding agent");
     expect(prompt).toContain("Extra stuff.");
@@ -327,7 +327,7 @@ describe("buildAgentPrompt", () => {
       expect(prompt).toMatch(/^<active_agent name="my-agent"\/>/);
     });
 
-    it("tag is present at start of prompt in append mode", () => {
+    it("tag follows the cacheable inherited prefix in append mode", () => {
       const config: AgentConfig = {
         name: "my-agent",
         description: "Test",
@@ -341,7 +341,13 @@ describe("buildAgentPrompt", () => {
         isolated: false,
       };
       const prompt = buildAgentPrompt(config, "/workspace", env, "Parent prompt.");
-      expect(prompt).toMatch(/^<active_agent name="my-agent"\/>/);
+      // Parent prompt must form the verbatim, cacheable byte prefix.
+      expect(prompt.startsWith("Parent prompt.")).toBe(true);
+      // The varying tag follows the static <sub_agent_context> bridge.
+      const ctxIdx = prompt.indexOf("<sub_agent_context>");
+      const tagIdx = prompt.indexOf('<active_agent name="my-agent"/>');
+      expect(ctxIdx).toBeGreaterThan(-1);
+      expect(tagIdx).toBeGreaterThan(ctxIdx);
     });
 
     it("tag uses agent name verbatim", () => {
@@ -380,6 +386,51 @@ describe("buildAgentPrompt", () => {
         const envIndex = prompt.indexOf("# Environment");
         expect(tagIndex).toBeLessThan(envIndex);
       }
+    });
+  });
+
+  // #187: the inherited parent prompt names the main checkout as cwd, so a
+  // worktree agent needs to be told which of the two paths is really its own.
+  describe("worktree isolation block", () => {
+    function worktreeConfig(promptMode: "append" | "replace"): AgentConfig {
+      return {
+        name: "test-agent",
+        description: "Test",
+        builtinToolNames: [],
+        extensions: true,
+        skills: true,
+        systemPrompt: "Custom instructions.",
+        promptMode,
+        inheritContext: false,
+        runInBackground: false,
+        isolated: false,
+      };
+    }
+
+    it("is absent without a worktree base", () => {
+      for (const promptMode of ["replace", "append"] as const) {
+        const prompt = buildAgentPrompt(worktreeConfig(promptMode), "/wt/copy", env, "Parent.", {});
+        expect(prompt).not.toContain("<worktree_isolation>");
+      }
+    });
+
+    it("names the parent checkout and follows the env block in both modes", () => {
+      for (const promptMode of ["replace", "append"] as const) {
+        const prompt = buildAgentPrompt(worktreeConfig(promptMode), "/wt/copy", env, "Parent.", {
+          worktreeBase: "/repo",
+        });
+        expect(prompt).toContain("isolated git worktree copy of /repo");
+        expect(prompt).toContain("never in /repo, even if other instructions name that path");
+        expect(prompt.indexOf("<worktree_isolation>")).toBeGreaterThan(prompt.indexOf("Working directory: /wt/copy"));
+      }
+    });
+
+    it("stays out of the cacheable inherited prefix", () => {
+      const prompt = buildAgentPrompt(worktreeConfig("append"), "/wt/copy", env, "Parent prompt.", {
+        worktreeBase: "/repo",
+      });
+      expect(prompt.startsWith("Parent prompt.")).toBe(true);
+      expect(prompt.indexOf("<worktree_isolation>")).toBeGreaterThan(prompt.indexOf("<sub_agent_context>"));
     });
   });
 });
