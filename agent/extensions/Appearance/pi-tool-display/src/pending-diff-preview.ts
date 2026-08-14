@@ -200,14 +200,11 @@ function toEditInput(value: unknown): EditPreviewInput {
   return value as EditPreviewInput;
 }
 
-function getEditPath(input: unknown): string | undefined {
+function getToolPath(input: unknown, preferFilePath: boolean): string | undefined {
   const record = toEditInput(input);
-  return trimPath(record.file_path) ?? trimPath(record.path);
-}
-
-function getWritePath(input: unknown): string | undefined {
-  const record = toEditInput(input);
-  return trimPath(record.path) ?? trimPath(record.file_path);
+  const filePath = trimPath(record.file_path);
+  const path = trimPath(record.path);
+  return preferFilePath ? filePath ?? path : path ?? filePath;
 }
 
 function getWriteContent(input: unknown): string | undefined {
@@ -309,7 +306,7 @@ function buildProjectedEditContent(originalContent: string, replacements: readon
 }
 
 export function buildPendingWritePreviewData(input: unknown, cwd: string): PendingDiffPreviewData | undefined {
-  const filePath = getWritePath(input);
+  const filePath = getToolPath(input, false);
   const nextContent = getWriteContent(input);
   if (!filePath || typeof nextContent !== "string") {
     return undefined;
@@ -327,7 +324,7 @@ export function buildPendingWritePreviewData(input: unknown, cwd: string): Pendi
 }
 
 export function buildPendingEditPreviewData(input: unknown, cwd: string): PendingDiffPreviewData | undefined {
-  const filePath = getEditPath(input);
+  const filePath = getToolPath(input, true);
   if (!filePath) {
     return undefined;
   }

@@ -1,4 +1,5 @@
 import { splitLeadingEnvAssignments } from "./shell-env-prefix.js";
+import { advanceQuoteEscapeState, readShellChars, type QuoteEscapeState } from "./shell-quote-state.js";
 
 interface ParsedPipeline {
 	segments: string[];
@@ -35,50 +36,26 @@ function splitLeadingRtkDbPathExportPrelude(command: string): ShellSafetyTarget 
 	};
 }
 
-function isTopLevelQuoteCharacter(character: string): character is '"' | "'" | "`" {
-	return character === '"' || character === "'" || character === "`";
-}
-
 function parseSimpleTopLevelPipeline(command: string): ParsedPipeline | null {
 	const segments: string[] = [];
 	const separators: string[] = [];
-	let quote: '"' | "'" | "`" | null = null;
-	let escaped = false;
+	const state: QuoteEscapeState = { quote: null, escaped: false };
 	let segmentStart = 0;
 	let suffix = "";
 
 	for (let index = 0; index < command.length; index += 1) {
-		const character = command[index] ?? "";
-		const nextCharacter = command[index + 1] ?? "";
+		const { character, nextCharacter } = readShellChars(command, index);
 		const previousCharacter = index > 0 ? (command[index - 1] ?? "") : "";
 
-		if (escaped) {
-			escaped = false;
+		if (advanceQuoteEscapeState(state, character, "\"'`")) {
 			continue;
 		}
 
-		if (quote !== null) {
-			if (character === "\\" && quote !== "'") {
-				escaped = true;
-				continue;
-			}
-			if (character === quote) {
-				quote = null;
-			}
-			continue;
-		}
-
-		if (character === "\\") {
-			escaped = true;
-			continue;
-		}
-
-		if (isTopLevelQuoteCharacter(character)) {
-			quote = character;
-			continue;
-		}
-
-		if (character === "|" && nextCharacter === "|") {
+		if (
+			(character === "|" && nextCharacter === "|") ||
+			(character === "&" && nextCharacter === "&") ||
+			character === ";"
+		) {
 			if (separators.length === 0) {
 				return null;
 			}
@@ -98,26 +75,8 @@ function parseSimpleTopLevelPipeline(command: string): ParsedPipeline | null {
 			continue;
 		}
 
-		if (character === "&" && nextCharacter === "&") {
-			if (separators.length === 0) {
-				return null;
-			}
-			segments.push(command.slice(segmentStart, index));
-			suffix = command.slice(index);
-			break;
-		}
-
 		if (character === "&" && nextCharacter !== ">" && previousCharacter !== ">" && previousCharacter !== "<") {
 			return null;
-		}
-
-		if (character === ";") {
-			if (separators.length === 0) {
-				return null;
-			}
-			segments.push(command.slice(segmentStart, index));
-			suffix = command.slice(index);
-			break;
 		}
 	}
 

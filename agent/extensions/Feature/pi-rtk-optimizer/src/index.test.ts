@@ -1,35 +1,38 @@
 import assert from "node:assert/strict";
-import { mock } from "bun:test";
 
-import { runTest } from "./test-helpers.ts";
+import { mock, runTest } from "./test-helpers.test.ts";
 
-mock.module("@earendil-works/pi-coding-agent", () => ({
-	getAgentDir: () => "/tmp/.pi/agent",
-	getSettingsListTheme: () => ({}),
-	isToolCallEventType: (toolName: string, event: Record<string, unknown>) => event.toolName === toolName,
-}));
-
-mock.module("@earendil-works/pi-tui", () => ({
-	Box: class {},
-	Container: class {
-		addChild(): void {}
-		render(): string[] {
-			return [];
-		}
-		invalidate(): void {}
+mock.module("@earendil-works/pi-coding-agent", {
+	namedExports: {
+		getAgentDir: () => "/tmp/.pi/agent",
+		getSettingsListTheme: () => ({}),
+		isToolCallEventType: (toolName: string, event: Record<string, unknown>) => event.toolName === toolName,
 	},
-	SettingsList: class {
-		handleInput(): void {}
-		updateValue(): void {}
+});
+
+mock.module("@earendil-works/pi-tui", {
+	namedExports: {
+		Box: class {},
+		Container: class {
+			addChild(): void {}
+			render(): string[] {
+				return [];
+			}
+			invalidate(): void {}
+		},
+		SettingsList: class {
+			handleInput(): void {}
+			updateValue(): void {}
+		},
+		Spacer: class {},
+		Text: class {},
+		truncateToWidth: (text: string) => text,
+		visibleWidth: (text: string) => text.length,
 	},
-	Spacer: class {},
-	Text: class {},
-	truncateToWidth: (text: string) => text,
-	visibleWidth: (text: string) => text.length,
-}));
+});
 
 const indexModule = await import("./index.ts");
-const { createBoundedNoticeTracker, shouldInjectSourceFilterTroubleshootingNote } = indexModule;
+const { createBoundedNoticeTracker, shouldInjectSourceFilterTroubleshootingNote, injectGuidelineIntoPrompt } = indexModule;
 const rtkIntegrationExtension = indexModule.default;
 const { DEFAULT_RTK_INTEGRATION_CONFIG } = await import("./types.ts");
 
@@ -184,6 +187,74 @@ runTest("source-filter note skipped when all read filtering safeguards are disab
 	);
 });
 
+runTest("injectGuidelineIntoPrompt inserts bullet inside Guidelines section when header is at index 0", () => {
+	const guideline = "Test guideline for RTK troubleshooting.";
+
+	const prompt = [
+		"Guidelines:",
+		"- Use mcp for MCP discovery first",
+		"- Be concise in your responses",
+		"",
+		"<project_context>",
+		"Project-specific instructions",
+	].join("\n");
+
+	const result = injectGuidelineIntoPrompt(prompt, guideline);
+
+	assert.ok(result.includes(guideline), "guideline must be present");
+
+	const bullet = `- ${guideline}`;
+	assert.ok(result.includes(bullet), "guideline must be a bullet line");
+
+	const guidelinesStart = result.indexOf("Guidelines:\n");
+	const bulletIndex = result.indexOf(bullet);
+	const projectContextIndex = result.indexOf("\n<project_context>");
+
+	assert.equal(guidelinesStart, 0, "Guidelines header must be at index 0");
+	assert.ok(bulletIndex > guidelinesStart, "bullet must be after Guidelines header");
+	assert.ok(projectContextIndex !== -1, "project_context section must exist");
+	assert.ok(bulletIndex < projectContextIndex, "bullet must be before project_context section");
+
+	assert.equal(injectGuidelineIntoPrompt(result, guideline), result, "should be idempotent");
+});
+
+runTest("injectGuidelineIntoPrompt inserts bullet inside Guidelines section when header is mid-prompt", () => {
+	const guideline = "Test guideline for RTK troubleshooting.";
+
+	const prompt = [
+		"You are an expert coding assistant.",
+		"",
+		"Guidelines:",
+		"- Be concise in your responses",
+		"",
+		"Pi documentation:",
+		"- Main documentation: /path/to/readme",
+	].join("\n");
+
+	const result = injectGuidelineIntoPrompt(prompt, guideline);
+
+	const bullet = `- ${guideline}`;
+	assert.ok(result.includes(bullet), "guideline must be a bullet line");
+
+	const guidelinesStart = result.indexOf("\nGuidelines:\n");
+	const bulletIndex = result.indexOf(bullet);
+	const piDocsIndex = result.indexOf("\nPi documentation:");
+
+	assert.ok(guidelinesStart !== -1, "Guidelines header must exist");
+	assert.ok(bulletIndex > guidelinesStart, "bullet must be after Guidelines header");
+	assert.ok(bulletIndex < piDocsIndex, "bullet must be before Pi documentation section");
+});
+
+runTest("injectGuidelineIntoPrompt falls back to appending when no Guidelines section exists", () => {
+	const guideline = "Test guideline for RTK troubleshooting.";
+	const prompt = "You are a coding assistant with no guidelines section.";
+
+	const result = injectGuidelineIntoPrompt(prompt, guideline);
+
+	assert.ok(result.includes(guideline), "guideline must be present");
+	assert.ok(result.endsWith(guideline), "guideline must be appended at the end");
+});
+
 await runTest("session_start refreshes RTK provenance and runtime guard skips missing rewrites", async () => {
 	const handlers: Record<string, ExtensionHandler> = {};
 	const notifications: Notification[] = [];
@@ -267,7 +338,7 @@ await runTest("tool execution lifecycle sanitizes streamed bash output", async (
 			content: [
 				{
 					type: "text",
-					text: "[rtk] /!\\ No hook installed — run `rtk init -g` for automatic token savings\n\nworking tree clean\n",
+					text: "\x1B[32mworking tree clean\x1B[0m\n",
 				},
 			],
 		},
@@ -278,10 +349,10 @@ await runTest("tool execution lifecycle sanitizes streamed bash output", async (
 	const endEvent = {
 		toolName: "bash",
 		toolCallId: "bash-1",
-		result: { content: [{ type: "text", text: "📄 src/file.ts\n✅ Files are identical\n" }] },
+		result: { content: [{ type: "text", text: "\x1B[31merror: build failed\x1B[0m\n" }] },
 	};
 	await endHandler(endEvent, {});
-	assert.equal(firstText(endEvent.result.content), "> src/file.ts\n[OK] Files are identical\n");
+	assert.equal(firstText(endEvent.result.content), "error: build failed\n");
 });
 
 await runTest("tool_result lifecycle merges compaction metadata with existing details", async () => {

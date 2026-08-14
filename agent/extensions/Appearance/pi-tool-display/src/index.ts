@@ -12,8 +12,8 @@ import {
   detectToolDisplayCapabilities,
   type ToolDisplayCapabilities,
 } from "./capabilities.js";
-import { registerToolDisplayCommand } from "./config-modal.js";
 import { registerToolDisplayOverrides } from "./tool-overrides.js";
+import { disposeAll, resetDisposed } from "./disposable.js";
 import { registerThinkingLabeling } from "./thinking-label.js";
 import registerNativeUserMessageBox from "./user-message-box-native.js";
 import {
@@ -34,6 +34,18 @@ function ownershipChanged(
 
 export default function toolDisplayExtension(pi: ExtensionAPI): void {
   const initial = loadToolDisplayConfig();
+  if (!initial.config.enabled) {
+    return;
+  }
+
+  resetDisposed();
+
+  pi.on("session_shutdown", (event: { reason: string }) => {
+    if (event.reason === "reload") {
+      disposeAll();
+    }
+  });
+
   let config: ToolDisplayConfig = initial.config;
   let pendingLoadError = initial.error;
   let capabilities: ToolDisplayCapabilities = {
@@ -73,11 +85,16 @@ export default function toolDisplayExtension(pi: ExtensionAPI): void {
 
   registerToolDisplayOverrides(pi, getEffectiveConfig);
   registerNativeUserMessageBox(pi, getConfig);
-  registerToolDisplayCommand(pi, { getConfig, setConfig, getCapabilities });
+  // thinking label 由 hide-thinking-default 扩展处理，此处不注册以避免重复前缀
+  // registerThinkingLabeling(pi);
 
-  if (config.enableThinkingLabels) {
-    registerThinkingLabeling(pi);
-  }
+  pi.registerCommand("tool-display", {
+    description: "Configure tool output rendering (OpenCode-style)",
+    handler: async (args, ctx) => {
+      const { runToolDisplayCommandHandler } = await import("./config-modal.js");
+      await runToolDisplayCommandHandler(args, ctx, { getConfig, setConfig, getCapabilities });
+    },
+  });
 
   pi.on("session_start", async (_event, ctx) => {
     refreshCapabilities();

@@ -4,7 +4,7 @@ import {
 	shouldRequireRtkAvailabilityForCommandHandling,
 	shouldSkipCommandHandlingWhenRtkMissing,
 } from "./runtime-guard.ts";
-import { cloneDefaultConfig, runTest } from "./test-helpers.ts";
+import { cloneDefaultConfig, runTest } from "./test-helpers.test.ts";
 import type { RuntimeStatus } from "./types.ts";
 
 function runtimeStatus(rtkAvailable: boolean): RuntimeStatus {

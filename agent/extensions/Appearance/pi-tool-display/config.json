@@ -10,7 +10,6 @@
     "write": true
   },
   "enableNativeUserMessageBox": true,
-  "enableThinkingLabels": false,
   "readOutputMode": "summary",
   "searchOutputMode": "count",
   "mcpOutputMode": "summary",

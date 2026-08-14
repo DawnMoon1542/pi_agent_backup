@@ -1,3 +1,4 @@
+import { normalizeDiffRenderWidth } from "./diff-presentation.js";
 import { pluralize } from "./render-utils.js";
 
 export interface WidthMeasurementOps {
@@ -10,11 +11,21 @@ export interface CollapsedDiffHintOptions {
 	hiddenHunks: number;
 }
 
-function normalizeWidth(width: number): number {
-	if (!Number.isFinite(width)) {
-		return 0;
+function guardSafeWidth(width: number): number | undefined {
+	const safe = normalizeDiffRenderWidth(width);
+	return safe === 0 ? undefined : safe;
+}
+
+function renderWithSafeWidth<T>(
+	width: number,
+	fallback: T,
+	render: (safeWidth: number) => T,
+): T {
+	const safeWidth = guardSafeWidth(width);
+	if (safeWidth === undefined) {
+		return fallback;
 	}
-	return Math.max(0, Math.floor(width));
+	return render(safeWidth);
 }
 
 export function clampRenderedLineToWidth(
@@ -22,23 +33,20 @@ export function clampRenderedLineToWidth(
 	width: number,
 	ops: WidthMeasurementOps,
 ): string {
-	const safeWidth = normalizeWidth(width);
-	if (safeWidth === 0) {
-		return "";
-	}
-
-	if (ops.measure(text) <= safeWidth) {
-		return text;
-	}
-
-	for (let targetWidth = safeWidth; targetWidth >= 0; targetWidth--) {
-		const candidate = ops.truncate(text, targetWidth);
-		if (ops.measure(candidate) <= safeWidth) {
-			return candidate;
+	return renderWithSafeWidth(width, "", (safeWidth) => {
+		if (ops.measure(text) <= safeWidth) {
+			return text;
 		}
-	}
 
-	return "";
+		for (let targetWidth = safeWidth; targetWidth >= 0; targetWidth--) {
+			const candidate = ops.truncate(text, targetWidth);
+			if (ops.measure(candidate) <= safeWidth) {
+				return candidate;
+			}
+		}
+
+		return "";
+	});
 }
 
 export function clampRenderedLinesToWidth(
@@ -54,35 +62,32 @@ export function buildCollapsedDiffHintText(
 	width: number,
 	ops: WidthMeasurementOps,
 ): string {
-	const safeWidth = normalizeWidth(width);
-	if (safeWidth === 0) {
-		return "";
-	}
+	return renderWithSafeWidth(width, "", (safeWidth) => {
+		const remainingText = `${options.remainingLines} more ${pluralize(options.remainingLines, "diff line")}`;
+		const hiddenHunksText = options.hiddenHunks > 0
+			? `${options.hiddenHunks} more ${pluralize(options.hiddenHunks, "hunk")}`
+			: undefined;
+		const shortRemainingText = `${options.remainingLines} more ${pluralize(options.remainingLines, "line")}`;
+		const shortHiddenHunksText = options.hiddenHunks > 0
+			? `${options.hiddenHunks} ${pluralize(options.hiddenHunks, "hunk")}`
+			: undefined;
 
-	const remainingText = `${options.remainingLines} more ${pluralize(options.remainingLines, "diff line")}`;
-	const hiddenHunksText = options.hiddenHunks > 0
-		? `${options.hiddenHunks} more ${pluralize(options.hiddenHunks, "hunk")}`
-		: undefined;
-	const shortRemainingText = `${options.remainingLines} more ${pluralize(options.remainingLines, "line")}`;
-	const shortHiddenHunksText = options.hiddenHunks > 0
-		? `${options.hiddenHunks} ${pluralize(options.hiddenHunks, "hunk")}`
-		: undefined;
+		const candidates = [
+			`… (${[remainingText, hiddenHunksText, "Ctrl+O to expand"].filter(Boolean).join(" • ")})`,
+			`… (${[remainingText, hiddenHunksText].filter(Boolean).join(" • ")})`,
+			`… (${[shortRemainingText, shortHiddenHunksText].filter(Boolean).join(" • ")})`,
+			options.hiddenHunks > 0
+				? `… (+${options.remainingLines} • +${options.hiddenHunks}h)`
+				: `… (+${options.remainingLines})`,
+			"…",
+		];
 
-	const candidates = [
-		`… (${[remainingText, hiddenHunksText, "Ctrl+O to expand"].filter(Boolean).join(" • ")})`,
-		`… (${[remainingText, hiddenHunksText].filter(Boolean).join(" • ")})`,
-		`… (${[shortRemainingText, shortHiddenHunksText].filter(Boolean).join(" • ")})`,
-		options.hiddenHunks > 0
-			? `… (+${options.remainingLines} • +${options.hiddenHunks}h)`
-			: `… (+${options.remainingLines})`,
-		"…",
-	];
-
-	for (const candidate of candidates) {
-		if (ops.measure(candidate) <= safeWidth) {
-			return candidate;
+		for (const candidate of candidates) {
+			if (ops.measure(candidate) <= safeWidth) {
+				return candidate;
+			}
 		}
-	}
 
-	return clampRenderedLineToWidth(candidates[candidates.length - 1] ?? "", safeWidth, ops);
+		return clampRenderedLineToWidth(candidates[candidates.length - 1] ?? "", safeWidth, ops);
+	});
 }

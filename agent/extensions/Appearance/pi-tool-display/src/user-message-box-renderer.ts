@@ -37,11 +37,26 @@ interface CachedUserMessageMarkdownRenderer {
   renderedLines: string[];
 }
 
+interface CachedUserMessageFinalOutput {
+  width: number;
+  theme: UserMessageTheme | undefined;
+  hasMarkdownState: boolean;
+  text?: string;
+  markdownTheme?: unknown;
+  defaultTextStyle?: Record<string, unknown>;
+  output: string[];
+}
+
+interface CachedUserMessageBodyLines {
+  width: number;
+  lines: string[];
+}
+
 const MIN_BORDER_WIDTH = 8;
 const TITLE_TEXT = " user ";
 const CONTENT_HORIZONTAL_PADDING_COLUMNS = 1;
 const USER_MESSAGE_TOP_MARGIN_LINES = 1;
-const USER_MESSAGE_PATCH_VERSION = 7;
+const USER_MESSAGE_PATCH_VERSION = 8;
 const MAX_USER_MESSAGE_MARKDOWN_TEXT_LENGTH = 100_000;
 const MAX_USER_MESSAGE_MARKDOWN_LINE_COUNT = 2_000;
 
@@ -81,11 +96,15 @@ function colorUserBackground(
   return applyUserMessageBackground(theme, text);
 }
 
+function computeBoxInnerWidth(totalWidth: number): number {
+  return Math.max(0, totalWidth - 2);
+}
+
 function buildTopBorder(
   totalWidth: number,
   theme: UserMessageTheme | undefined,
 ): string {
-  const innerWidth = Math.max(0, totalWidth - 2);
+  const innerWidth = computeBoxInnerWidth(totalWidth);
   const title = truncateToWidth(TITLE_TEXT, innerWidth, "");
   const fill = "─".repeat(Math.max(0, innerWidth - visibleWidth(title)));
   const row = `${colorBorder(theme, "╭")}${colorTitle(theme, title)}${colorBorder(theme, `${fill}╮`)}`;
@@ -97,7 +116,7 @@ function buildBottomBorder(
   totalWidth: number,
   theme: UserMessageTheme | undefined,
 ): string {
-  const innerWidth = Math.max(0, totalWidth - 2);
+  const innerWidth = computeBoxInnerWidth(totalWidth);
   const row = `${colorBorder(theme, "╰")}${colorBorder(theme, `${"─".repeat(innerWidth)}╯`)}`;
 
   return colorUserBackground(theme, row);
@@ -180,12 +199,63 @@ function hasSameDefaultTextStyle(
 }
 
 function hasSameMarkdownState(
-  cached: CachedUserMessageMarkdownRenderer,
+  cached: Pick<CachedUserMessageMarkdownRenderer, "text" | "theme" | "defaultTextStyle">,
   state: UserMessageMarkdownState,
 ): boolean {
   return cached.text === state.text
     && cached.theme === state.theme
     && hasSameDefaultTextStyle(cached.defaultTextStyle, state.defaultTextStyle);
+}
+
+function hasSameFinalOutputState(
+  cached: CachedUserMessageFinalOutput,
+  width: number,
+  theme: UserMessageTheme | undefined,
+  markdownState: UserMessageMarkdownState | undefined,
+): boolean {
+  if (cached.width !== width || cached.theme !== theme) {
+    return false;
+  }
+
+  if (!markdownState) {
+    return !cached.hasMarkdownState;
+  }
+
+  return cached.hasMarkdownState
+    && hasSameMarkdownState(
+      {
+        text: cached.text ?? "",
+        theme: cached.markdownTheme,
+        defaultTextStyle: cached.defaultTextStyle,
+      },
+      markdownState,
+    );
+}
+
+function toFinalOutputCacheEntry(
+  width: number,
+  theme: UserMessageTheme | undefined,
+  markdownState: UserMessageMarkdownState | undefined,
+  output: string[],
+): CachedUserMessageFinalOutput {
+  if (!markdownState) {
+    return {
+      width,
+      theme,
+      hasMarkdownState: false,
+      output,
+    };
+  }
+
+  return {
+    width,
+    theme,
+    hasMarkdownState: true,
+    text: markdownState.text,
+    markdownTheme: markdownState.theme,
+    defaultTextStyle: markdownState.defaultTextStyle,
+    output,
+  };
 }
 
 export function shouldBypassUserMessageMarkdownRebuild(
@@ -247,16 +317,26 @@ function renderUserMessageBodyLines(
   instance: unknown,
   innerWidth: number,
   originalRender: (width: number) => string[],
+  markdownState: UserMessageMarkdownState | undefined,
+  originalBodyLineCache?: WeakMap<object, CachedUserMessageBodyLines>,
 ): string[] {
   if (typeof instance !== "object" || instance === null) {
-    return originalRender.call(instance, innerWidth);
+    return originalRender.call(instance, innerWidth) as string[];
   }
 
-  const markdownState = extractUserMessageMarkdownState(
-    instance as { children?: unknown[] },
-  );
-  if (!markdownState || shouldBypassUserMessageMarkdownRebuild(markdownState)) {
-    return originalRender.call(instance, innerWidth);
+  if (!markdownState) {
+    const cached = originalBodyLineCache?.get(instance);
+    if (cached?.width === innerWidth) {
+      return cached.lines;
+    }
+
+    const lines = originalRender.call(instance, innerWidth) as string[];
+    originalBodyLineCache?.set(instance, { width: innerWidth, lines });
+    return lines;
+  }
+
+  if (shouldBypassUserMessageMarkdownRebuild(markdownState)) {
+    return originalRender.call(instance, innerWidth) as string[];
   }
 
   try {
@@ -266,7 +346,7 @@ function renderUserMessageBodyLines(
       innerWidth,
     );
   } catch {
-    return originalRender.call(instance, innerWidth);
+    return originalRender.call(instance, innerWidth) as string[];
   }
 }
 
@@ -275,6 +355,9 @@ export function patchNativeUserMessagePrototype(
   getTheme: () => UserMessageTheme | undefined,
   isEnabled: () => boolean,
 ): void {
+  const finalOutputCache = new WeakMap<object, CachedUserMessageFinalOutput>();
+  const originalBodyLineCache = new WeakMap<object, CachedUserMessageBodyLines>();
+
   patchUserMessageRenderPrototype(
     prototype,
     USER_MESSAGE_PATCH_VERSION,
@@ -282,18 +365,39 @@ export function patchNativeUserMessagePrototype(
       function renderWithNativeUserBorder(width: number): string[] {
         const safeWidth = Math.max(0, Math.floor(width));
         if (!isEnabled() || safeWidth < MIN_BORDER_WIDTH) {
-          return originalRender.call(this, safeWidth);
+          return originalRender.call(this, safeWidth) as string[];
+        }
+
+        const canCacheFinalOutput = typeof this === "object" && this !== null;
+        const markdownState = canCacheFinalOutput
+          ? extractUserMessageMarkdownState(this as { children?: unknown[] })
+          : undefined;
+        if (markdownState && shouldBypassUserMessageMarkdownRebuild(markdownState)) {
+          return originalRender.call(this, safeWidth) as string[];
+        }
+
+        const theme = getTheme();
+        if (canCacheFinalOutput) {
+          const cached = finalOutputCache.get(this as object);
+          if (cached && hasSameFinalOutputState(cached, safeWidth, theme, markdownState)) {
+            return cached.output;
+          }
         }
 
         const innerWidth = getUserMessageContentWidth(safeWidth);
-        const lines = renderUserMessageBodyLines(this, innerWidth, originalRender);
+        const lines = renderUserMessageBodyLines(
+          this,
+          innerWidth,
+          originalRender,
+          markdownState,
+          originalBodyLineCache,
+        );
         const contentLines = normalizeUserMessageContentLines(lines);
         const paddedContentLines = addUserMessageVerticalPadding(
           contentLines.length > 0 ? contentLines : [""],
         );
-        const theme = getTheme();
 
-        return [
+        const output = [
           ...Array.from({ length: USER_MESSAGE_TOP_MARGIN_LINES }, () => ""),
           buildTopBorder(safeWidth, theme),
           ...paddedContentLines.map((renderLine) =>
@@ -301,6 +405,15 @@ export function patchNativeUserMessagePrototype(
           ),
           buildBottomBorder(safeWidth, theme),
         ];
+
+        if (canCacheFinalOutput) {
+          finalOutputCache.set(
+            this as object,
+            toFinalOutputCacheEntry(safeWidth, theme, markdownState, output),
+          );
+        }
+
+        return output;
       },
   );
 }

@@ -51,6 +51,70 @@ const IMPORT_PATTERN = /^(use\s+|import\s+|from\s+|require\(|#include)/;
 const SIGNATURE_PATTERN = /^(pub\s+)?(async\s+)?(fn|def|function|func|class|struct|enum|trait|interface|type)\s+\w+/;
 const CONST_PATTERN = /^(const|static|let|pub\s+const|pub\s+static)\s+/;
 
+function getCodePortion(line: string, language: Language): string {
+	const patterns = COMMENT_PATTERNS[language];
+	let quote: '"' | "'" | "`" | null = null;
+	let escaped = false;
+	let code = "";
+
+	for (let index = 0; index < line.length; index += 1) {
+		const character = line[index] ?? "";
+
+		if (escaped) {
+			escaped = false;
+			continue;
+		}
+
+		if (quote !== null) {
+			if (character === "\\") {
+				escaped = true;
+				continue;
+			}
+			if (character === quote) {
+				quote = null;
+			}
+			continue;
+		}
+
+		if (patterns.line && line.startsWith(patterns.line, index)) {
+			break;
+		}
+
+		if (patterns.blockStart && patterns.blockEnd && line.startsWith(patterns.blockStart, index)) {
+			const blockEndIndex = line.indexOf(patterns.blockEnd, index + patterns.blockStart.length);
+			if (blockEndIndex === -1) {
+				break;
+			}
+			index = blockEndIndex + patterns.blockEnd.length - 1;
+			continue;
+		}
+
+		if (character === '"' || character === "'" || character === "`") {
+			quote = character;
+			continue;
+		}
+
+		code += character;
+	}
+
+	return code;
+}
+
+function countCodeBraces(line: string, language: Language): { open: number; close: number } {
+	let open = 0;
+	let close = 0;
+
+	for (const character of getCodePortion(line, language)) {
+		if (character === "{") {
+			open += 1;
+		} else if (character === "}") {
+			close += 1;
+		}
+	}
+
+	return { open, close };
+}
+
 export function detectLanguage(filePath: string): Language {
 	const lastDot = filePath.lastIndexOf(".");
 	if (lastDot === -1) {
@@ -164,14 +228,14 @@ export function filterAggressive(content: string, language: Language): string {
 			continue;
 		}
 
-		const openBraces = (trimmed.match(/\{/g) ?? []).length;
-		const closeBraces = (trimmed.match(/\}/g) ?? []).length;
+		const braces = countCodeBraces(line, language);
+		const codeTrimmed = getCodePortion(line, language).trim();
 
 		if (inImplementation) {
-			braceDepth += openBraces;
-			braceDepth -= closeBraces;
+			braceDepth += braces.open;
+			braceDepth -= braces.close;
 
-			if (braceDepth <= 1 && (trimmed === "{" || trimmed === "}" || trimmed.endsWith("{"))) {
+			if (braceDepth <= 1 && (codeTrimmed === "{" || codeTrimmed === "}" || codeTrimmed.endsWith("{"))) {
 				result.push(line);
 			}
 

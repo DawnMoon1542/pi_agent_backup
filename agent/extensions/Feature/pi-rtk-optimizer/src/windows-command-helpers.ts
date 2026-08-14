@@ -1,3 +1,5 @@
+import { advanceQuoteEscapeState, readShellChars, type QuoteEscapeState } from "./shell-quote-state.js";
+
 interface WindowsBashCompatibilityResult {
 	command: string;
 	applied: string[];
@@ -33,36 +35,12 @@ function parseLeadingCdSlashD(command: string): LeadingCdSlashDParse | null {
 	}
 
 	const pathStart = prefixMatch[0].length;
-	let quote: '"' | "'" | null = null;
-	let escaped = false;
+	const state: QuoteEscapeState = { quote: null, escaped: false };
 
 	for (let index = pathStart; index < command.length; index += 1) {
-		const character = command[index] ?? "";
-		const nextCharacter = command[index + 1] ?? "";
+		const { character, nextCharacter } = readShellChars(command, index);
 
-		if (escaped) {
-			escaped = false;
-			continue;
-		}
-
-		if (quote !== null) {
-			if (character === "\\" && quote !== "'") {
-				escaped = true;
-				continue;
-			}
-			if (character === quote) {
-				quote = null;
-			}
-			continue;
-		}
-
-		if (character === "\\") {
-			escaped = true;
-			continue;
-		}
-
-		if (character === '"' || character === "'") {
-			quote = character;
+		if (advanceQuoteEscapeState(state, character, "\"'")) {
 			continue;
 		}
 

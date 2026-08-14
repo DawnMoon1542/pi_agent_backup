@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-07-03
+
+### Changed
+- Extracted a lazy module loader, shell-quote state machine, compaction state, and content-block helpers. ([4229513](https://github.com/MasuRii/pi-rtk-optimizer/commit/422951343759b47e81443273731469481723365f) [8c39b94](https://github.com/MasuRii/pi-rtk-optimizer/commit/8c39b94965879aef5c39ab74d19c6ff20f437e02))
+- Consolidated the config store and extracted border-line rendering in the Zellij modal. ([ccdee3d](https://github.com/MasuRii/pi-rtk-optimizer/commit/ccdee3df3a36246941bace9b138dc93e38a6363b) [762ee6a](https://github.com/MasuRii/pi-rtk-optimizer/commit/762ee6a9ca1e68fc4f705532d87c4130a337985c))
+- Renamed inline test files to the `.test.ts` convention. ([25ec5eb](https://github.com/MasuRii/pi-rtk-optimizer/commit/25ec5eb361d9d22404f08f9d6186677fdcbd2c74))
+- Added the owned extension directory to `.gitignore`. ([af2e851](https://github.com/MasuRii/pi-rtk-optimizer/commit/af2e85173379fb46e3a2c4ada23bec9de0b47aa0))
+- Updated README with badges, a Ko-fi link, and a refreshed file tree. ([e70ca70](https://github.com/MasuRii/pi-rtk-optimizer/commit/e70ca70de7925cc56a02c6d7c43a2065b2ebc74f))
+- Widened Pi peer dependency compatibility to include `^0.80.0` and added vulnerability overrides (`protobufjs`, `ws`). ([92137b2](https://github.com/MasuRii/pi-rtk-optimizer/commit/92137b2689988c64922478176ff60396e35efff2))
+
+### Fixed
+- Ignored string and comment braces in source filtering. ([85fbd28](https://github.com/MasuRii/pi-rtk-optimizer/commit/85fbd28edceb780d254ea0dc6cb2b31c6f572b37))
+- Counted Unicode pass/fail symbols in the test-output fallback. ([b59b18d](https://github.com/MasuRii/pi-rtk-optimizer/commit/b59b18d26d83a016cc2fd04ffab8e80b50540f54))
+
+### Removed
+- Removed the emoji and rtk-hook-warning techniques. ([8f07417](https://github.com/MasuRii/pi-rtk-optimizer/commit/8f07417d1d539fd62cb97cd4e30431a45f819642))
+- Removed the unused ripgrep rewrite. ([ccdee3d](https://github.com/MasuRii/pi-rtk-optimizer/commit/ccdee3df3a36246941bace9b138dc93e38a6363b))
+
+## [0.8.3] - 2026-06-16
+
+### Fixed
+- Added a runtime-agnostic `mock.module` shim so tests using `node:test` module mocking also pass under Bun's `bun:test` compatibility layer.
+- Deep-cloned fallback default config objects in `config-store.ts` to prevent caller mutations from leaking into subsequent config loads.
+
+## [0.8.2] - 2026-06-01
+
+### Changed
+- Deferred output compactor and configuration modal loading during extension bootstrap.
+- Replaced technique barrel imports with direct module imports.
+- Kept inline test entrypoints on Bun while using a runtime-agnostic test helper for compatibility.
+- Widened Pi peer dependency ranges to include `^0.77.0 || ^0.78.0`.
+
+## [0.8.1] - 2026-05-26
+
+### Changed
+- Widened `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui` peer dependency ranges to `^0.74.0 || ^0.75.0`.
+
+## [0.8.0] - 2026-05-22
+
+### Added
+- Added tabbed `/rtk` settings modal groups with left/right tab navigation and context-aware help for search and value changes.
+- Added anchor-safe `read` compaction that detects hashline/anchored read output and preserves complete edit anchors during source filtering, smart truncation, and hard truncation.
+
+### Changed
+- Updated package metadata and lockfile version to `0.8.0` and migrated Pi peer dependency metadata to the `@earendil-works` scope.
+
 ## [0.7.1] - 2026-05-04
 
 ### Changed
@@ -29,7 +75,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - Updated README and example configuration defaults for safer read-compaction behavior and troubleshooting guidance.
-- Updated `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui` peer dependencies to ^0.72.0.
+- Updated `@mariozechner/pi-coding-agent` and `@mariozechner/pi-tui` peer dependencies to ^0.72.0.
 
 ## [0.6.0] - 2026-04-27
 
@@ -45,7 +91,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Config path resolution now uses Pi's `getAgentDir()` API so `PI_CODING_AGENT_DIR` is respected for extension config paths (thanks to @tynanbe for PR #3).
 - Global skill-read preservation paths now resolve through Pi's agent directory so `PI_CODING_AGENT_DIR` is respected (thanks to @tynanbe for PR #3).
 - Source-filter troubleshooting note injection now only runs when output compaction, source filtering, and read truncation safeguards are active (thanks to @philipbjorge for PR #4).
-- Updated `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui` peer dependencies to ^0.70.0.
+- Updated `@mariozechner/pi-coding-agent` and `@mariozechner/pi-tui` peer dependencies to ^0.70.0.
 - Clarified README and settings modal copy for global extension/config paths, skill directory paths, source-filter note behavior, architecture, and event hooks.
 
 ### Removed
@@ -62,7 +108,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.5.2] - 2026-04-01
 
 ### Changed
-- Updated `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui` peer dependencies to ^0.64.0
+- Updated `@mariozechner/pi-coding-agent` and `@mariozechner/pi-tui` peer dependencies to ^0.64.0
 - Improved RTK note message to guide users through '/rtk' toggle in Pi TUI
 
 ## [0.5.1] - 2026-03-24
@@ -92,7 +138,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `rtk-command-environment.ts` module for platform-specific temp directory resolution and shell-safe quoting
 
 ### Changed
-- Updated `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui` peer dependencies to ^0.62.0
+- Updated `@mariozechner/pi-coding-agent` and `@mariozechner/pi-tui` peer dependencies to ^0.62.0
 - Simplified RTK hook warning detection — removed unused command-specific patterns and consolidated detection logic
 - Focus on canonical hook warning messages that RTK emits
 - Updated tests to verify simplified behavior and ensure non-hook RTK output is preserved verbatim

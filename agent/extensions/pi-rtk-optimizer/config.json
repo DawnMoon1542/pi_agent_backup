@@ -1,8 +1,8 @@
 {
   "enabled": true,
-  "mode": "suggest",
-  "guardWhenRtkMissing": true,
-  "showRewriteNotifications": false,
+  "mode": "rewrite",
+  "guardWhenRtkMissing": false,
+  "showRewriteNotifications": true,
   "outputCompaction": {
     "enabled": true,
     "stripAnsi": true,
@@ -10,9 +10,9 @@
       "enabled": false
     },
     "sourceCodeFilteringEnabled": false,
-    "preserveExactSkillReads": true,
+    "preserveExactSkillReads": false,
     "truncate": {
-      "enabled": false,
+      "enabled": true,
       "maxChars": 12000
     },
     "sourceCodeFiltering": "none",

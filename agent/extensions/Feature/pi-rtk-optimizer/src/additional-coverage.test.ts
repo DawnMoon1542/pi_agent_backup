@@ -1,21 +1,22 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
-import { mock } from "bun:test";
 
 import { clearOutputMetrics, getOutputMetricsSummary, trackOutputSavings } from "./output-metrics.ts";
-import { runTest } from "./test-helpers.ts";
+import { mock, runTest } from "./test-helpers.test.ts";
 import { matchesCommandPatterns, normalizeCommandForDetection } from "./techniques/command-detection.ts";
 import { compactPath } from "./techniques/path-utils.ts";
+import { filterAggressive } from "./techniques/source.ts";
+import { aggregateTestOutput } from "./techniques/test-output.ts";
 import { applyWindowsBashCompatibilityFixes } from "./windows-command-helpers.ts";
 import { applyRewrittenCommandShellSafetyFixups } from "./rewrite-pipeline-safety.ts";
 import { applyRtkCommandEnvironment } from "./rtk-command-environment.ts";
 import { sanitizeStreamingBashExecutionResult } from "./tool-execution-sanitizer.ts";
-import { sanitizeRtkEmojiOutput } from "./techniques/emoji.ts";
-import { stripRtkHookWarnings } from "./techniques/rtk.ts";
 
-mock.module("@earendil-works/pi-coding-agent", () => ({
-	getAgentDir: () => "/tmp/.pi/agent",
-}));
+mock.module("@earendil-works/pi-coding-agent", {
+	namedExports: {
+		getAgentDir: () => "/tmp/.pi/agent",
+	},
+});
 
 const {
 	ensureConfigExists,
@@ -141,6 +142,25 @@ runTest("config-store falls back to defaults when JSON is invalid", () => {
 	}
 });
 
+runTest("config-store malformed-file defaults are isolated from caller mutation", () => {
+	const tempPath = makeTempConfigPath();
+	cleanupFile(tempPath);
+
+	try {
+		writeFileSync(tempPath, "{not valid json", "utf-8");
+		const firstLoad = loadRtkIntegrationConfig(tempPath);
+		firstLoad.config.outputCompaction.truncate.maxChars = 42_424;
+		firstLoad.config.outputCompaction.readCompaction.enabled = true;
+
+		const secondLoad = loadRtkIntegrationConfig(tempPath);
+
+		assert.equal(secondLoad.config.outputCompaction.truncate.maxChars, 12_000);
+		assert.equal(secondLoad.config.outputCompaction.readCompaction.enabled, false);
+	} finally {
+		cleanupFile(tempPath);
+	}
+});
+
 runTest("output metrics summarize tracked savings and clear state", () => {
 	clearOutputMetrics();
 	assert.equal(getOutputMetricsSummary(), "RTK output compaction metrics: no data yet.");
@@ -160,6 +180,55 @@ runTest("output metrics summarize tracked savings and clear state", () => {
 	assert.equal(getOutputMetricsSummary(), "RTK output compaction metrics: no data yet.");
 });
 
+runTest("aggressive source filtering ignores string and inline comment braces while tracking implementation blocks", () => {
+	const withLiteralBrace = [
+		"function first() {",
+		'  const value = "{";',
+		"  return value;",
+		"}",
+		"function second() {",
+		"  return true;",
+		"}",
+	].join("\n");
+	const withoutLiteralBrace = [
+		"function first() {",
+		'  const value = "plain";',
+		"  return value;",
+		"}",
+		"function second() {",
+		"  return true;",
+		"}",
+	].join("\n");
+	const withInlineCommentBrace = [
+		"function first() {",
+		"  const value = 1; // {",
+		"  return value;",
+		"}",
+		"function second() {",
+		"  return true;",
+		"}",
+	].join("\n");
+	const withoutInlineCommentBrace = [
+		"function first() {",
+		"  const value = 1; // no brace",
+		"  return value;",
+		"}",
+		"function second() {",
+		"  return true;",
+		"}",
+	].join("\n");
+
+	assert.equal(filterAggressive(withLiteralBrace, "typescript"), filterAggressive(withoutLiteralBrace, "typescript"));
+	assert.equal(filterAggressive(withInlineCommentBrace, "typescript"), filterAggressive(withoutInlineCommentBrace, "typescript"));
+});
+
+runTest("test output fallback counts unicode pass and fail symbols", () => {
+	const result = aggregateTestOutput("✓ creates user\n✔ updates user\n✕ deletes user\n✗ archives user\n", "bun test");
+
+	assert.ok(result?.includes("PASS: 2 passed"));
+	assert.ok(result?.includes("FAIL: 2 failed"));
+});
+
 runTest("command detection ignores env prefixes, blank lines, and chained suffixes", () => {
 	assert.equal(normalizeCommandForDetection("NODE_ENV=test FOO=bar npm test && echo done"), "npm test");
 	assert.equal(normalizeCommandForDetection("\n\n PYTHONPATH=src git status\n echo later"), "git status");
@@ -177,6 +246,39 @@ runTest("RTK command environment preserves explicit leading RTK_DB_PATH override
 
 	const exportedCommand = 'export RTK_DB_PATH="/custom/history.db"; rtk git diff';
 	assert.equal(applyRtkCommandEnvironment(exportedCommand), exportedCommand);
+});
+
+runTest("RTK command environment respects inherited RTK_DB_PATH values", () => {
+	const previousRtkDbPath = process.env.RTK_DB_PATH;
+	const command = "rtk git status";
+
+	try {
+		process.env.RTK_DB_PATH = "/persistent/shared/history.db";
+
+		assert.equal(applyRtkCommandEnvironment(command), command);
+	} finally {
+		if (previousRtkDbPath === undefined) {
+			delete process.env.RTK_DB_PATH;
+		} else {
+			process.env.RTK_DB_PATH = previousRtkDbPath;
+		}
+	}
+});
+
+runTest("RTK command environment ignores blank inherited RTK_DB_PATH values", () => {
+	const previousRtkDbPath = process.env.RTK_DB_PATH;
+
+	try {
+		process.env.RTK_DB_PATH = "   ";
+
+		assert.match(applyRtkCommandEnvironment("rtk git status"), /^export RTK_DB_PATH=/);
+	} finally {
+		if (previousRtkDbPath === undefined) {
+			delete process.env.RTK_DB_PATH;
+		} else {
+			process.env.RTK_DB_PATH = previousRtkDbPath;
+		}
+	}
 });
 
 runTest("RTK command environment single-quotes hostile temp paths", () => {
@@ -315,80 +417,23 @@ runTest("RTK command environment uses export prelude for shell compound commands
 	assert.ok(/; for d in a b; do echo "\$d"; done$/.test(rewritten));
 });
 
-runTest("stripRtkHookWarnings handles bare, prefixed, and already-sanitized hook notices", () => {
-	assert.equal(
-		stripRtkHookWarnings("No hook installed — run `rtk init -g` for automatic token savings\n\nready\n", null),
-		"ready\n",
-	);
-	assert.equal(
-		stripRtkHookWarnings("[WARN] Hook outdated — run `rtk init -g` to update\n\nready\n", null),
-		"ready\n",
-	);
-	assert.equal(
-		stripRtkHookWarnings(
-			"?? bun.lock[rtk] /!\\ No hook installed — run `rtk init -g` for automatic token savings\n",
-			null,
-		),
-		"?? bun.lock\n",
-	);
-	assert.equal(
-		stripRtkHookWarnings("[rtk] /!\\ No hook installed — run `rtk init -g` for automatic token savings\n\n", "rtk git status"),
-		"",
-	);
-});
-
-runTest("stripRtkHookWarnings leaves quoted hook text untouched", () => {
-	const quoted = 'const warning = "No hook installed — run `rtk init -g` for automatic token savings";\n';
-	assert.equal(stripRtkHookWarnings(quoted, null), null);
-});
-
-runTest("sanitizeRtkEmojiOutput normalizes RTK-shaped warning output without removing content", () => {
-	const sanitized = sanitizeRtkEmojiOutput(
-		"⚠️  Warning: --hook-only only makes sense with --global\n    For local projects, use default mode or --claude-md\n",
-		"rtk init --hook-only",
-	);
-	assert.equal(
-		sanitized,
-		"[WARN]  Warning: --hook-only only makes sense with --global\n    For local projects, use default mode or --claude-md\n",
-	);
-});
-
-runTest("streaming sanitizer strips hook notices, sanitizes emoji output, and preserves non-text blocks", () => {
-	const hookNoticeResult = {
+runTest("streaming sanitizer strips ANSI codes and preserves non-text blocks", () => {
+	const ansiResult = {
 		content: [
-			{
-				type: "text",
-				text: "[rtk] /!\\ No hook installed — run `rtk init -g` for automatic token savings\n\nworking tree clean\n",
-			},
-		],
-	};
-	const hookNoticeSanitization = sanitizeStreamingBashExecutionResult(hookNoticeResult, "rtk git status");
-	assert.equal(hookNoticeSanitization.changed, true);
-	assert.equal(
-		((hookNoticeSanitization.result as typeof hookNoticeResult).content[0] as { text: string }).text,
-		"working tree clean\n",
-	);
-	assert.equal(
-		(hookNoticeResult.content[0] as { text: string }).text,
-		"[rtk] /!\\ No hook installed — run `rtk init -g` for automatic token savings\n\nworking tree clean\n",
-	);
-
-	const emojiResult = {
-		content: [
-			{ type: "text", text: "📄 src/file.ts\n✅ Files are identical\n" },
+			{ type: "text", text: "\x1B[32mworking tree clean\x1B[0m\n" },
 			{ type: "image", url: "ignored" },
 		],
 	};
-	const emojiSanitization = sanitizeStreamingBashExecutionResult(emojiResult, "rtk git diff -- src/file.ts");
-	assert.equal(emojiSanitization.changed, true);
+	const ansiSanitization = sanitizeStreamingBashExecutionResult(ansiResult, "rtk git status");
+	assert.equal(ansiSanitization.changed, true);
 	assert.equal(
-		((emojiSanitization.result as typeof emojiResult).content[0] as { text: string }).text,
-		"> src/file.ts\n[OK] Files are identical\n",
+		((ansiSanitization.result as typeof ansiResult).content[0] as { text: string }).text,
+		"working tree clean\n",
 	);
-	assert.equal((emojiResult.content[0] as { text: string }).text, "📄 src/file.ts\n✅ Files are identical\n");
-	assert.deepEqual((emojiSanitization.result as typeof emojiResult).content[1], { type: "image", url: "ignored" });
+	assert.equal((ansiResult.content[0] as { text: string }).text, "\x1B[32mworking tree clean\x1B[0m\n");
+	assert.deepEqual((ansiSanitization.result as typeof ansiResult).content[1], { type: "image", url: "ignored" });
 
-	const parseWarningResult = {
+	const plainResult = {
 		content: [
 			{
 				type: "text",
@@ -396,11 +441,11 @@ runTest("streaming sanitizer strips hook notices, sanitizes emoji output, and pr
 			},
 		],
 	};
-	const parseWarningSanitization = sanitizeStreamingBashExecutionResult(parseWarningResult, "rtk git status");
-	assert.equal(parseWarningSanitization.changed, false);
-	assert.equal(parseWarningSanitization.result, parseWarningResult);
+	const plainSanitization = sanitizeStreamingBashExecutionResult(plainResult, "rtk git status");
+	assert.equal(plainSanitization.changed, false);
+	assert.equal(plainSanitization.result, plainResult);
 	assert.equal(
-		(parseWarningResult.content[0] as { text: string }).text,
+		(plainResult.content[0] as { text: string }).text,
 		"[rtk] warning: builtin filters: parse failure\n\nworking tree clean\n",
 	);
 });

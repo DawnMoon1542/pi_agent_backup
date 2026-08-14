@@ -60,12 +60,16 @@ function hasLeadingRtkDbPathAssignment(command: string): boolean {
 	);
 }
 
+function hasInheritedRtkDbPath(): boolean {
+	return Boolean(process.env[RTK_DB_PATH_ENV_NAME]?.trim());
+}
+
 export function applyRtkCommandEnvironment(command: string): string {
 	if (!command.trim()) {
 		return command;
 	}
 
-	if (hasLeadingRtkDbPathAssignment(command)) {
+	if (hasLeadingRtkDbPathAssignment(command) || hasInheritedRtkDbPath()) {
 		return command;
 	}
 

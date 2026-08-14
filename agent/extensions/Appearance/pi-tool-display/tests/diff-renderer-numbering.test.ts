@@ -84,3 +84,52 @@ test("split diff derives sequential new-side line numbers for canonical numbered
 		`Expected the new pane to preserve a strictly sequential numbering model.\n${lines.join("\n")}`,
 	);
 });
+
+const hashlineDiff = [
+	" 1#ZP:alpha",
+	"-2#  :beta",
+	"+2#A1:bravo",
+	" 3#BC:gamma",
+].join("\n");
+
+function renderHashlineDiff(expanded: boolean): string {
+	const width = 100;
+	const component = renderEditDiffResult(
+		{ diff: hashlineDiff },
+		{ expanded, filePath: "demo.txt" },
+		{
+			diffViewMode: "unified",
+			diffSplitMinWidth: 80,
+			diffCollapsedLines: 24,
+			diffWordWrap: false,
+		} as any,
+		theme,
+		"",
+	);
+
+	return renderInsideToolBox(component, width).join("\n");
+}
+
+test("collapsed edit diff renderer hides hashline anchors while preserving visible line numbers", () => {
+	const rendered = renderHashlineDiff(false);
+
+	assert.doesNotMatch(
+		rendered,
+		/\b\d+#(?:ZP|A1|BC|\s{2}):/,
+		`Expected hashline anchor metadata to be hidden from collapsed edit diff display.\n${rendered}`,
+	);
+	assert.match(rendered, /\b1\s+│ alpha\b/);
+	assert.match(rendered, /\b2\s+│ bravo\b/);
+	assert.match(rendered, /\b3\s+│ gamma\b/);
+});
+
+test("expanded edit diff renderer shows compact hashline labels in the line-number gutter", () => {
+	const rendered = renderHashlineDiff(true);
+
+	assert.match(rendered, /(?:^|\n) 1#ZP│ alpha\b/);
+	assert.match(rendered, /(?:^|\n) 2# {2}│ beta\b/);
+	assert.match(rendered, /(?:^|\n) 2#A1│ bravo\b/);
+	assert.match(rendered, /(?:^|\n) 3#BC│ gamma\b/);
+	assert.doesNotMatch(rendered, /(?:^|\n) {2,}1#ZP│/);
+	assert.doesNotMatch(rendered, /│\s+\d+#(?:ZP|A1|BC|\s{2}):/);
+});

@@ -1,4 +1,5 @@
 import { resolveRtkRewrite, type RtkRewriteProviderOptions } from "./rtk-rewrite-provider.js";
+import { splitLeadingEnvAssignments } from "./shell-env-prefix.js";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { RtkIntegrationConfig } from "./types.js";
 
@@ -21,7 +22,8 @@ export async function computeRewriteDecision(
 	}
 
 	const trimmedStart = command.trimStart();
-	if (trimmedStart === "rtk" || trimmedStart.startsWith("rtk ")) {
+	const effectiveCommand = splitLeadingEnvAssignments(trimmedStart).command.trimStart();
+	if (effectiveCommand === "rtk" || effectiveCommand.startsWith("rtk ")) {
 		return { changed: false, originalCommand: command, rewrittenCommand: command, reason: "already_rtk" };
 	}
 

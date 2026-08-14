@@ -1,24 +1,14 @@
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { SettingItem } from "@earendil-works/pi-tui";
 import { toOnOff } from "./boolean-format.js";
+import type { RtkIntegrationController } from "./command-register.js";
 import { ZellijModal, ZellijSettingsModal } from "./zellij-modal.js";
-import { getRtkArgumentCompletions } from "./command-completions.js";
 import {
 	DEFAULT_RTK_INTEGRATION_CONFIG,
 	RTK_SOURCE_FILTER_LEVELS,
 	type RtkIntegrationConfig,
 	type RuntimeStatus,
 } from "./types.js";
-
-interface RtkIntegrationController {
-	getConfig(): RtkIntegrationConfig;
-	setConfig(next: RtkIntegrationConfig, ctx: ExtensionCommandContext): void;
-	getConfigPath(): string;
-	getRuntimeStatus(): RuntimeStatus;
-	refreshRuntimeStatus(): Promise<RuntimeStatus>;
-	getMetricsSummary(): string;
-	clearMetrics(): void;
-}
 
 interface SettingValueSyncTarget {
 	updateValue(id: string, value: string): void;
@@ -31,6 +21,70 @@ const TRUNCATE_MAX_CHAR_VALUES = ["4000", "8000", "12000", "20000", "50000", "10
 const SMART_TRUNCATE_LINE_VALUES = ["40", "80", "120", "160", "220", "320", "500", "1000", "2000", "4000"];
 const RTK_USAGE_TEXT =
 	"Usage: /rtk [show|path|verify|stats|clear-stats|reset|help] (or run /rtk with no args to open settings modal)";
+const SETTINGS_TAB_DEFINITIONS = [
+	{
+		label: "General",
+		settingIds: ["enabled", "mode", "showRewriteNotifications", "guardWhenRtkMissing"],
+	},
+	{
+		label: "Compaction",
+		settingIds: [
+			"outputCompactionEnabled",
+			"outputStripAnsi",
+			"outputAggregateTestOutput",
+			"outputFilterBuildOutput",
+			"outputCompactGitOutput",
+			"outputAggregateLinterOutput",
+			"outputGroupSearchOutput",
+			"outputTrackSavings",
+		],
+	},
+	{
+		label: "Read & Source",
+		settingIds: [
+			"outputReadCompactionEnabled",
+			"outputSourceFilteringEnabled",
+			"outputSourceFiltering",
+			"outputPreserveExactSkillReads",
+		],
+	},
+	{
+		label: "Truncation",
+		settingIds: [
+			"outputTruncateEnabled",
+			"outputTruncateMaxChars",
+			"outputSmartTruncate",
+			"outputSmartTruncateMaxLines",
+		],
+	},
+] as const;
+
+function buildTabbedSettingGroups(settings: SettingItem[]): Array<{ label: string; settings: SettingItem[] }> {
+	const byId = new Map(settings.map((setting) => [setting.id, setting]));
+	const assignedIds = new Set<string>();
+
+	const tabs = SETTINGS_TAB_DEFINITIONS.map(({ label, settingIds }) => ({
+		label,
+		settings: settingIds.map((id) => {
+			const setting = byId.get(id);
+			if (!setting) {
+				throw new Error(`Missing setting item for tab '${label}': ${id}`);
+			}
+			if (assignedIds.has(id)) {
+				throw new Error(`Setting item assigned to multiple tabs: ${id}`);
+			}
+			assignedIds.add(id);
+			return setting;
+		}),
+	}));
+
+	const unassignedIds = settings.map((setting) => setting.id).filter((id) => !assignedIds.has(id));
+	if (unassignedIds.length > 0) {
+		throw new Error(`Unassigned setting items: ${unassignedIds.join(", ")}`);
+	}
+
+	return tabs;
+}
 
 function parseSourceFilterLevel(
 	value: string,
@@ -400,12 +454,14 @@ async function openSettingsModal(ctx: ExtensionCommandContext, controller: RtkIn
 		(tui, theme, _keybindings, done) => {
 			let current = controller.getConfig();
 			let settingsModal: ZellijSettingsModal | null = null;
+			const allSettings = buildSettingItems(current);
+			const tabs = buildTabbedSettingGroups(allSettings);
 
 			settingsModal = new ZellijSettingsModal(
 				{
-					title: "RTK Integration Settings",
-					description: "Bash rewrite + tool output compaction for lower token usage",
-					settings: buildSettingItems(current),
+					title: "Pi RTK Optimizer",
+					tabs,
+					activeTabIndex: 0,
 					onChange: (id, newValue) => {
 						current = applySetting(current, id, newValue);
 						controller.setConfig(current, ctx);
@@ -415,7 +471,7 @@ async function openSettingsModal(ctx: ExtensionCommandContext, controller: RtkIn
 						}
 					},
 					onClose: () => done(),
-					helpText: `/rtk show • /rtk verify • /rtk stats • /rtk reset • ${controller.getConfigPath()}`,
+					helpText: `Config: ${controller.getConfigPath()}`,
 					enableSearch: true,
 				},
 				theme,
@@ -426,11 +482,14 @@ async function openSettingsModal(ctx: ExtensionCommandContext, controller: RtkIn
 				{
 					borderStyle: "rounded",
 					titleBar: {
-						left: "RTK Integration Settings",
-						right: "pi-rtk-optimizer",
+						left: "Pi RTK Optimizer",
 					},
 					helpUndertitle: {
-						text: "Esc: close | ↑↓: navigate | Space: toggle",
+						variants: [
+							"←/→ tabs • Type to search • Enter/Space change • Esc close",
+							"←/→ tabs • Type to search • Esc close",
+							"←/→ tabs • Esc close",
+						],
 						color: "dim",
 					},
 					overlay: overlayOptions,
@@ -515,21 +574,19 @@ async function handleArgs(
 	return true;
 }
 
-export function registerRtkIntegrationCommand(pi: ExtensionAPI, controller: RtkIntegrationController): void {
-	pi.registerCommand("rtk", {
-		description: "Configure RTK rewrite and output compaction integration",
-		getArgumentCompletions: getRtkArgumentCompletions,
-		handler: async (args, ctx) => {
-			if (await handleArgs(args, ctx, controller)) {
-				return;
-			}
+export async function handleRtkIntegrationCommand(
+	args: string,
+	ctx: ExtensionCommandContext,
+	controller: RtkIntegrationController,
+): Promise<void> {
+	if (await handleArgs(args, ctx, controller)) {
+		return;
+	}
 
-			if (!ctx.hasUI) {
-				ctx.ui.notify("/rtk requires interactive TUI mode.", "warning");
-				return;
-			}
+	if (!ctx.hasUI) {
+		ctx.ui.notify("/rtk requires interactive TUI mode.", "warning");
+		return;
+	}
 
-			await openSettingsModal(ctx, controller);
-		},
-	});
+	await openSettingsModal(ctx, controller);
 }

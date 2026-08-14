@@ -9,6 +9,18 @@
     "edit": true,
     "write": true
   },
+  "customToolOverrides": {
+    "ide_find_symbol": {
+      "enabled": false,
+      "kind": "generic",
+      "outputMode": "summary"
+    },
+    "custom_mcp_gateway": {
+      "enabled": false,
+      "kind": "mcp",
+      "outputMode": "summary"
+    }
+  },
   "enableNativeUserMessageBox": true,
   "readOutputMode": "hidden",
   "searchOutputMode": "hidden",

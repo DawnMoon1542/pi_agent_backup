@@ -1,6 +1,6 @@
 import { ANSI_SGR_PATTERN, sanitizeAnsiForThemedOutput } from "./ansi-utils.js";
 
-const OSC_133_PROMPT_MARKER_PATTERN = /\x1b\]133;[A-Z](?:;[^\x07\x1b]*)?(?:\x07|\x1b\\)/g;
+const OSC_PROMPT_CONTROL_SEQUENCE_PATTERN = /\x1b\](?:133|633);[A-Z](?:;[^\x07\x1b]*)?(?:\x07|\x1b\\)/g;
 const USER_MESSAGE_BACKGROUND = "userMessageBg";
 const ANSI_BG_RESET = "\x1b[49m";
 const USER_MESSAGE_VERTICAL_PADDING_LINES = 1;
@@ -10,16 +10,22 @@ export interface UserMessageBackgroundTheme {
   getBgAnsi?(color: string): string;
 }
 
-function stripOsc133PromptMarkers(text: string): string {
-  if (!text || !text.includes("\x1b]133;")) {
+function hasPromptControlOscSequence(text: string): boolean {
+  return text.includes("\x1b]133;") || text.includes("\x1b]633;");
+}
+
+function stripOscPromptControlSequences(text: string): string {
+  if (!text || !hasPromptControlOscSequence(text)) {
     return text;
   }
 
-  return text.replace(OSC_133_PROMPT_MARKER_PATTERN, "");
+  // Strip prompt-control OSC sequences only. OSC 8 hyperlinks are intentionally
+  // preserved because they carry renderable terminal hyperlink metadata.
+  return text.replace(OSC_PROMPT_CONTROL_SEQUENCE_PATTERN, "");
 }
 
 function sanitizeUserMessageAnsi(text: string): string {
-  return sanitizeAnsiForThemedOutput(stripOsc133PromptMarkers(text));
+  return sanitizeAnsiForThemedOutput(stripOscPromptControlSequences(text));
 }
 
 export function applyUserMessageBackground(
@@ -39,21 +45,23 @@ export function applyUserMessageBackground(
     if (typeof theme.getBgAnsi === "function") {
       return `${theme.getBgAnsi(USER_MESSAGE_BACKGROUND)}${sanitized}${ANSI_BG_RESET}`;
     }
-  } catch {
+  } catch (themeError) {
+    void themeError;
   }
 
   try {
     if (typeof theme.bg === "function") {
       return theme.bg(USER_MESSAGE_BACKGROUND, sanitized);
     }
-  } catch {
+  } catch (themeError) {
+    void themeError;
   }
 
   return sanitized;
 }
 
 function isVisuallyEmptyLine(line: string): boolean {
-  const withoutControlSequences = stripOsc133PromptMarkers(line)
+  const withoutControlSequences = stripOscPromptControlSequences(line)
     .replace(ANSI_SGR_PATTERN, "");
   return withoutControlSequences.trim().length === 0;
 }

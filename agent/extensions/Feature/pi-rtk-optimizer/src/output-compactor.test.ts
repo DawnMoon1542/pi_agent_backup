@@ -1,14 +1,15 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
-import { mock } from "bun:test";
 
-import { cloneDefaultConfig, runTest } from "./test-helpers.ts";
+import { cloneDefaultConfig, mock, runTest } from "./test-helpers.test.ts";
 
 const TEST_AGENT_DIR = "/tmp/.pi/agent";
 
-mock.module("@earendil-works/pi-coding-agent", () => ({
-	getAgentDir: () => TEST_AGENT_DIR,
-}));
+mock.module("@earendil-works/pi-coding-agent", {
+	namedExports: {
+		getAgentDir: () => TEST_AGENT_DIR,
+	},
+});
 
 const { compactToolResult } = await import("./output-compactor.ts");
 
@@ -72,6 +73,14 @@ function compactGrepOutput(text: string): string {
 function assertNoOutputEmoji(text: string): void {
 	for (const marker of OUTPUT_EMOJI_MARKERS) {
 		assert.equal(text.includes(marker), false, `Unexpected output emoji marker: ${marker}`);
+	}
+}
+
+function assertNoPartialHashlineAnchors(text: string): void {
+	for (const line of text.split(/\r?\n/)) {
+		if (/^\s*\d+\s*#[A-Za-z0-9_-]{2,32}:/.test(line)) {
+			assert.equal(line.endsWith("..."), false, `Anchor line was partially truncated: ${line}`);
+		}
 	}
 }
 
@@ -166,6 +175,203 @@ runTest("normal read compacts and adds banner when read compaction is enabled", 
 	const compacted = firstTextBlock(result.content);
 	assert.ok(compacted.startsWith("[RTK compacted output:"));
 	assert.ok(compacted.includes("source:minimal"));
+});
+
+runTest("line-anchor read output compacts without corrupting LINE#HASH anchors", () => {
+	const config = cloneDefaultConfig();
+	setReadCompaction(config, true);
+	config.outputCompaction.sourceCodeFilteringEnabled = true;
+	config.outputCompaction.sourceCodeFiltering = "minimal";
+	config.outputCompaction.smartTruncate.enabled = true;
+	config.outputCompaction.smartTruncate.maxLines = 40;
+	config.outputCompaction.truncate.enabled = true;
+	config.outputCompaction.truncate.maxChars = 5000;
+
+	const content = Array.from({ length: 120 }, (_value, index) => {
+		const lineNumber = index + 1;
+		const sourceLine = lineNumber % 2 === 0 ? `const value${lineNumber} = ${lineNumber};` : `// comment ${lineNumber}`;
+		return `${String(lineNumber).padStart(3, " ")}#ZP:${sourceLine}`;
+	}).join("\n");
+	const result = compactToolResult(
+		{
+			toolName: "read",
+			input: { path: "sample.ts" },
+			content: [{ type: "text", text: content }],
+		},
+		config,
+	);
+
+	assert.equal(result.changed, true);
+	assert.ok(result.techniques.includes("source:minimal"));
+
+	const compacted = firstTextBlock(result.content);
+	assert.ok(compacted.startsWith("[RTK compacted output:"));
+	assert.ok(compacted.includes("source:minimal"));
+	assert.match(compacted, /\n\s*2#ZP:const value2 = 2;/);
+	assert.equal(compacted.includes("#ZP:// comment"), false);
+	assertNoPartialHashlineAnchors(compacted);
+});
+
+runTest("colon-pipe anchor read output compacts without requiring hashline extension", () => {
+	const config = cloneDefaultConfig();
+	setReadCompaction(config, true);
+	config.outputCompaction.sourceCodeFilteringEnabled = true;
+	config.outputCompaction.sourceCodeFiltering = "minimal";
+	config.outputCompaction.smartTruncate.enabled = true;
+	config.outputCompaction.smartTruncate.maxLines = 40;
+	config.outputCompaction.truncate.enabled = true;
+	config.outputCompaction.truncate.maxChars = 5000;
+
+	const content = [
+		"Read sample.ts: 120 lines",
+		"",
+		...Array.from({ length: 120 }, (_value, index) => {
+			const lineNumber = index + 1;
+			const sourceLine = lineNumber % 2 === 0 ? `const value${lineNumber} = ${lineNumber};` : `// comment ${lineNumber}`;
+			return `${lineNumber}:${(lineNumber % 256).toString(16).padStart(2, "0")}|${sourceLine}`;
+		}),
+	].join("\n");
+	const result = compactToolResult(
+		{
+			toolName: "read",
+			input: { path: "sample.ts" },
+			content: [{ type: "text", text: content }],
+		},
+		config,
+	);
+
+	assert.equal(result.changed, true);
+	assert.ok(result.techniques.includes("source:minimal"));
+
+	const compacted = firstTextBlock(result.content);
+	assert.ok(compacted.includes("Read sample.ts: 120 lines"));
+	assert.match(compacted, /\n2:02\|const value2 = 2;/);
+	assert.equal(compacted.includes("|// comment"), false);
+});
+
+runTest("compact LINEHASH pipe anchors from oh-my-pi style reads", () => {
+	const config = cloneDefaultConfig();
+	setReadCompaction(config, true);
+	config.outputCompaction.sourceCodeFilteringEnabled = true;
+	config.outputCompaction.sourceCodeFiltering = "minimal";
+	config.outputCompaction.smartTruncate.enabled = true;
+	config.outputCompaction.smartTruncate.maxLines = 40;
+	config.outputCompaction.truncate.enabled = true;
+	config.outputCompaction.truncate.maxChars = 5000;
+
+	const content = Array.from({ length: 120 }, (_value, index) => {
+		const lineNumber = index + 1;
+		const hash = lineNumber % 2 === 0 ? "sr" : "ab";
+		const sourceLine = lineNumber % 2 === 0 ? `const value${lineNumber} = ${lineNumber};` : `// comment ${lineNumber}`;
+		return `${lineNumber}${hash}|${sourceLine}`;
+	}).join("\n");
+	const result = compactToolResult(
+		{
+			toolName: "read",
+			input: { path: "sample.ts" },
+			content: [{ type: "text", text: content }],
+		},
+		config,
+	);
+
+	assert.equal(result.changed, true);
+	assert.ok(result.techniques.includes("source:minimal"));
+
+	const compacted = firstTextBlock(result.content);
+	assert.match(compacted, /\n2sr\|const value2 = 2;/);
+	assert.equal(compacted.includes("|// comment"), false);
+});
+
+runTest("compact hashline-tools file wrapper while preserving non-anchor wrapper lines", () => {
+	const config = cloneDefaultConfig();
+	setReadCompaction(config, true);
+	config.outputCompaction.sourceCodeFilteringEnabled = true;
+	config.outputCompaction.sourceCodeFiltering = "minimal";
+	config.outputCompaction.smartTruncate.enabled = true;
+	config.outputCompaction.smartTruncate.maxLines = 40;
+	config.outputCompaction.truncate.enabled = true;
+	config.outputCompaction.truncate.maxChars = 5000;
+
+	const content = [
+		"<file>",
+		...Array.from({ length: 120 }, (_value, index) => {
+			const lineNumber = index + 1;
+			const sourceLine = lineNumber % 2 === 0 ? `const value${lineNumber} = ${lineNumber};` : `// comment ${lineNumber}`;
+			return `${lineNumber}#ZM:${sourceLine}`;
+		}),
+		"",
+		"(End of file - 120 total lines)",
+		"</file>",
+	].join("\n");
+	const result = compactToolResult(
+		{
+			toolName: "read",
+			input: { path: "sample.ts" },
+			content: [{ type: "text", text: content }],
+		},
+		config,
+	);
+
+	assert.equal(result.changed, true);
+	assert.ok(result.techniques.includes("source:minimal"));
+
+	const compacted = firstTextBlock(result.content);
+	assert.ok(compacted.includes("<file>"));
+	assert.ok(compacted.includes("(End of file - 120 total lines)"));
+	assert.ok(compacted.includes("</file>"));
+	assert.match(compacted, /\n2#ZM:const value2 = 2;/);
+	assert.equal(compacted.includes("#ZM:// comment"), false);
+});
+
+runTest("anchor-safe read hard truncation preserves whole hashline anchors", () => {
+	const config = cloneDefaultConfig();
+	setReadCompaction(config, true);
+	config.outputCompaction.sourceCodeFilteringEnabled = false;
+	config.outputCompaction.smartTruncate.enabled = false;
+	config.outputCompaction.truncate.enabled = true;
+	config.outputCompaction.truncate.maxChars = 350;
+
+	const content = Array.from({ length: 120 }, (_value, index) => {
+		const lineNumber = index + 1;
+		return `${lineNumber}#ZP:const value${lineNumber} = "${"x".repeat(40)}";`;
+	}).join("\n");
+	const result = compactToolResult(
+		{
+			toolName: "read",
+			input: { path: "sample.ts" },
+			content: [{ type: "text", text: content }],
+		},
+		config,
+	);
+
+	assert.equal(result.changed, true);
+	assert.ok(result.techniques.includes("truncate"));
+
+	const compacted = firstTextBlock(result.content);
+	assert.ok(compacted.includes("anchor-safe truncate"));
+	assertNoPartialHashlineAnchors(compacted);
+});
+
+runTest("incidental single anchor-like line does not disable normal read compaction", () => {
+	const config = cloneDefaultConfig();
+	setReadCompaction(config, true);
+	config.outputCompaction.sourceCodeFilteringEnabled = true;
+	config.outputCompaction.sourceCodeFiltering = "minimal";
+	config.outputCompaction.smartTruncate.enabled = true;
+	config.outputCompaction.smartTruncate.maxLines = 40;
+
+	const content = [`1#ZP:not an anchored read`, buildReadContent(120)].join("\n");
+	const result = compactToolResult(
+		{
+			toolName: "read",
+			input: { path: "sample.ts" },
+			content: [{ type: "text", text: content }],
+		},
+		config,
+	);
+
+	assert.equal(result.changed, true);
+	assert.ok(result.techniques.includes("source:minimal") || result.techniques.includes("smart-truncate"));
 });
 
 runTest("short read output stays exact below threshold", () => {
@@ -381,118 +587,19 @@ runTest("search output uses plain-text summary and file markers", () => {
 	assertNoOutputEmoji(compacted);
 });
 
-runTest("rtk env output sanitizes emoji section headers", () => {
-	const compacted = compactBashOutput(
-		"rtk env",
-		"📂 PATH Variables:\n🔧 Language/Runtime:\n☁️  Cloud/Services:\n🛠️  Tools:\n📋 Other:\n📊 Total: 91 vars\n",
-	);
-
-	assert.ok(compacted.includes("PATH Variables:"));
-	assert.ok(compacted.includes("Language/Runtime:"));
-	assert.ok(compacted.includes("Cloud/Services:"));
-	assert.ok(compacted.includes("Tools:"));
-	assert.ok(compacted.includes("Other:"));
-	assert.ok(compacted.includes("Total: 91 vars"));
-	assertNoOutputEmoji(compacted);
-});
-
-runTest("rtk-shaped env output sanitizes even when command name is not rtk", () => {
-	const compacted = compactBashOutput(
-		"echo probe",
-		"📂 PATH Variables:\n🔧 Language/Runtime:\n📊 Total: 91 vars\n",
-	);
-
-	assert.ok(compacted.includes("PATH Variables:"));
-	assert.ok(compacted.includes("Language/Runtime:"));
-	assert.ok(compacted.includes("Total: 91 vars"));
-	assertNoOutputEmoji(compacted);
-});
-
-runTest("rtk git-style output sanitizes emoji status markers", () => {
-	const compacted = compactBashOutput(
-		"rtk git status",
-		"📌 main\n✅ Staged: 1 files\n📝 Modified: 2 files\n❓ Untracked: 1 files\n⚠️  Conflicts: 1 files\n",
-	);
-
-	assert.ok(compacted.includes("Branch: main"));
-	assert.ok(compacted.includes("[OK] Staged: 1 files"));
-	assert.ok(compacted.includes("Modified: 2 files"));
-	assert.ok(compacted.includes("[INFO] Untracked: 1 files"));
-	assert.ok(compacted.includes("[WARN]  Conflicts: 1 files"));
-	assertNoOutputEmoji(compacted);
-});
-
-runTest("rtk grep-style output sanitizes emoji file markers", () => {
-	const compacted = compactBashOutput(
-		"rtk grep EXTENSION_NAME agent/extensions/pi-rtk-optimizer/src/constants.ts",
-		"🔍 2 in 1F:\n\n📄 agent/extensions/pi-rtk-optimizer/src/constants.ts (2):\n     4: export const EXTENSION_NAME = \"pi-rtk-optimizer\";\n",
-	);
-
-	assert.ok(compacted.startsWith("2 in 1F:\n\n> agent/extensions/pi-rtk-optimizer/src/constants.ts (2):"));
-	assertNoOutputEmoji(compacted);
-});
-
-runTest("rtk git diff verbose summary sanitizes file markers", () => {
-	const compacted = compactBashOutput(
-		"rtk git diff -- agent/extensions/pi-mcp-adapter/package.json",
-		"agent/extensions/pi-mcp-adapter/package.json | 2 +-\n\n--- Changes ---\n\n📄 agent/extensions/pi-mcp-adapter/package.json\n  @@ -38,7 +38,7 @@\n  -    \"@earendil-works/pi-coding-agent\": \"^0.58.1\",\n",
-	);
-
-	assert.ok(compacted.includes("--- Changes ---"));
-	assert.ok(compacted.includes("> agent/extensions/pi-mcp-adapter/package.json"));
-	assertNoOutputEmoji(compacted);
-});
-
 runTest("git diff compaction skips already-compacted RTK-shaped output", () => {
-	const compacted = compactBashOutput(
-		"git diff -- agent/extensions/pi-mcp-adapter/package.json",
-		"agent/extensions/pi-mcp-adapter/package.json | 2 +-\n\n--- Changes ---\n\n📄 agent/extensions/pi-mcp-adapter/package.json\n  @@ -38,7 +38,7 @@\n  -    \"@earendil-works/pi-coding-agent\": \"^0.58.1\",\n",
-	);
-
-	assert.ok(compacted.includes("--- Changes ---"));
-	assert.ok(compacted.includes("> agent/extensions/pi-mcp-adapter/package.json"));
-	assertNoOutputEmoji(compacted);
-});
-
-runTest("rtk-shaped diff output sanitizes even when command name is not rtk", () => {
-	const compacted = compactBashOutput(
-		"echo probe",
-		"📊 file-a.txt → file-b.txt\n   +1 added, -1 removed, ~0 modified\n\n-   2 beta\n+   2 gamma\n",
-	);
-
-	assert.ok(compacted.startsWith("file-a.txt -> file-b.txt"));
-	assertNoOutputEmoji(compacted);
-});
-
-runTest("rtk-shaped identical diff output sanitizes even when command name is not rtk", () => {
-	const compacted = compactBashOutput("echo probe", "✅ Files are identical");
-
-	assert.equal(compacted, "[OK] Files are identical");
-	assertNoOutputEmoji(compacted);
-});
-
-runTest("hook warning is stripped even when the command label is not rtk", () => {
-	const compacted = compactBashOutput(
-		"echo probe",
-		"[rtk] /!\\ No hook installed — run `rtk init -g` for automatic token savings\n\n4 files changed\n",
-	);
-
-	assert.equal(compacted, "4 files changed\n");
-});
-
-runTest("hook-only output compacts to an empty text result", () => {
 	const result = compactToolResult(
 		{
 			toolName: "bash",
-			input: { command: "rtk git status" },
-			content: [{ type: "text", text: "[rtk] /!\\ No hook installed — run `rtk init -g` for automatic token savings\n" }],
+			input: { command: "git diff -- agent/extensions/pi-mcp-adapter/package.json" },
+			content: [{ type: "text", text: "agent/extensions/pi-mcp-adapter/package.json | 2 +-\n\n--- Changes ---\n\n> agent/extensions/pi-mcp-adapter/package.json\n  @@ -38,7 +38,7 @@\n  -    \"@earendil-works/pi-coding-agent\": \"^0.58.1\",\n" }],
 		},
 		cloneDefaultConfig(),
 	);
 
-	assert.equal(result.changed, true);
-	assert.ok(result.techniques.includes("rtk-hook-warning"));
-	assert.equal(firstTextBlock(result.content), "");
+	assert.equal(result.changed, false);
+	assert.equal(result.content, undefined);
+	assert.deepEqual(result.techniques, []);
 });
 
 runTest("non-hook RTK warnings are preserved verbatim", () => {
@@ -508,27 +615,6 @@ runTest("non-hook RTK warnings are preserved verbatim", () => {
 	assert.equal(result.changed, false);
 	assert.equal(result.content, undefined);
 	assert.deepEqual(result.techniques, []);
-});
-
-runTest("emoji RTK warnings stay visible and are sanitized to plain text", () => {
-	const compacted = compactBashOutput(
-		"rtk init --hook-only",
-		"⚠️  Warning: --hook-only only makes sense with --global\n    For local projects, use default mode or --claude-md\n\nready\n",
-	);
-
-	assert.ok(compacted.includes("[WARN]  Warning: --hook-only only makes sense with --global"));
-	assert.ok(compacted.includes("For local projects, use default mode or --claude-md"));
-	assert.ok(compacted.includes("ready\n"));
-	assertNoOutputEmoji(compacted);
-});
-
-runTest("outdated hook warning is stripped while preserving the RTK payload", () => {
-	const compacted = compactBashOutput(
-		"rtk gain",
-		"⚠️  Hook outdated — run `rtk init -g` to update\n\nSaved 42 tokens\n",
-	);
-
-	assert.equal(compacted, "Saved 42 tokens\n");
 });
 
 runTest("quoted hook warning text is preserved as payload", () => {

@@ -1,6 +1,6 @@
 import { Text, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component } from "@earendil-works/pi-tui";
 import { getLanguageFromPath, highlightCode, type EditToolDetails } from "@earendil-works/pi-coding-agent";
-import { ANSI_SGR_PATTERN, STYLE_RESET_PARAMS, toSgrParams } from "./ansi-utils.js";
+import { ANSI_SGR_PATTERN, STYLE_RESET_PARAMS, filterSgrSequences, toSgrParams, readSgrColorSequence, isFiniteSgrParam, expandSgrReset } from "./ansi-utils.js";
 import {
 	buildCollapsedDiffHintText,
 	clampRenderedLineToWidth,
@@ -13,6 +13,7 @@ import {
 	type DiffPresentationMode,
 } from "./diff-presentation.js";
 import { pluralize, sanitizeAnsiForThemedOutput } from "./render-utils.js";
+import { splitWriteContentLines } from "./write-display-utils.js";
 import { DEFAULT_TOOL_DISPLAY_CONFIG, type DiffIndicatorMode, type ToolDisplayConfig } from "./types.js";
 
 interface DiffTheme {
@@ -33,6 +34,7 @@ interface DiffLineEntry {
 	newLineNumber: number | null;
 	fallbackLineNumber: string;
 	content: string;
+	hashlineAnchorContent?: string;
 	raw: string;
 	hunkIndex: number;
 }
@@ -100,6 +102,7 @@ interface DiffRenderOptions {
 type CodeLineHighlighter = (line: string) => string;
 
 const CANONICAL_LINE_PATTERN = /^([+\- ])(\s*\d+)\|(.*)$/;
+const HASHLINE_ANCHOR_LINE_PATTERN = /^([+\- ])(\s*\d+)#([A-Za-z0-9]+| {2}):(.*)$/;
 const LEGACY_LINE_PATTERN = /^([+\- ])(\s*\d+)\s(.*)$/;
 const HUNK_HEADER_PATTERN = /^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@(.*)$/;
 const SPLIT_SEPARATOR = " │ ";
@@ -134,58 +137,31 @@ function emphasis(theme: DiffTheme, text: string): string {
 	return typeof theme.bold === "function" ? theme.bold(text) : text;
 }
 
-function isFiniteSgrParam(value: number | undefined): value is number {
-	return typeof value === "number" && Number.isFinite(value);
-}
 
-function readSgrColorSequence(params: number[], index: number): number[] | undefined {
-	const param = params[index];
-	if (param !== 38 && param !== 48) {
-		return undefined;
-	}
-
-	const colorMode = params[index + 1];
-	if (colorMode === 5) {
-		const colorValue = params[index + 2];
-		return isFiniteSgrParam(colorValue) ? [param, colorMode, colorValue] : undefined;
-	}
-
-	if (colorMode === 2) {
-		const red = params[index + 2];
-		const green = params[index + 3];
-		const blue = params[index + 4];
-		return isFiniteSgrParam(red) && isFiniteSgrParam(green) && isFiniteSgrParam(blue)
-			? [param, colorMode, red, green, blue]
-			: undefined;
-	}
-
-	return undefined;
-}
 
 function sequenceResetsBackground(params: number[]): boolean {
-	for (let index = 0; index < params.length; index++) {
+	let index = 0;
+	while (index < params.length) {
 		const param = params[index] ?? 0;
 		if (param === 0 || param === 49) {
 			return true;
 		}
 
 		const colorSequence = readSgrColorSequence(params, index);
-		if (colorSequence) {
-			index += colorSequence.length - 1;
-		}
+		index += colorSequence ? colorSequence.length : 1;
 	}
 
 	return false;
 }
 
 function stripBackgroundResetParams(params: number[]): number[] {
-	const sanitized: number[] = [];
+	const filtered: number[] = [];
 
-	for (let index = 0; index < params.length; index++) {
-		const param = params[index] ?? 0;
+	for (let i = 0; i < params.length; i++) {
+		const param = params[i] ?? 0;
 
 		if (param === 0) {
-			sanitized.push(...STYLE_RESET_PARAMS);
+			filtered.push(...expandSgrReset(param)!);
 			continue;
 		}
 
@@ -193,35 +169,24 @@ function stripBackgroundResetParams(params: number[]): number[] {
 			continue;
 		}
 
-		const colorSequence = readSgrColorSequence(params, index);
+		const colorSequence = readSgrColorSequence(params, i);
 		if (colorSequence) {
-			sanitized.push(...colorSequence);
-			index += colorSequence.length - 1;
+			filtered.push(...colorSequence);
+			i += colorSequence.length - 1;
 			continue;
 		}
 
-		sanitized.push(param);
+		filtered.push(param);
 	}
 
-	return sanitized;
+	return filtered;
 }
 
 function stabilizeBackgroundResets(text: string): string {
-	if (!text || !text.includes("\x1b[")) {
+	if (!text) {
 		return text;
 	}
-
-	return text.replace(ANSI_SGR_PATTERN, (_sequence, rawParams: string) => {
-		const parsed = toSgrParams(rawParams);
-		if (parsed.length === 0) {
-			return "";
-		}
-		const sanitized = stripBackgroundResetParams(parsed);
-		if (sanitized.length === 0) {
-			return "";
-		}
-		return `\x1b[${sanitized.join(";")}m`;
-	});
+	return filterSgrSequences(text, stripBackgroundResetParams);
 }
 
 function fitToWidth(text: string, width: number): string {
@@ -317,11 +282,47 @@ function createCodeLineHighlighter(language: string | undefined): CodeLineHighli
 	};
 }
 
+function toParsedDiffLine(
+	prefix: string,
+	lineNumber: string,
+	content: string,
+): {
+	lineKind: DiffLineKind;
+	lineNumber: string;
+	content: string;
+} {
+	const normalizedLineNumber = lineNumber.trim();
+	if (prefix === "+") {
+		return { lineKind: "add", lineNumber: normalizedLineNumber, content };
+	}
+	if (prefix === "-") {
+		return { lineKind: "remove", lineNumber: normalizedLineNumber, content };
+	}
+	return { lineKind: "context", lineNumber: normalizedLineNumber, content };
+}
+
 function parseCanonicalDiffLine(line: string): {
 	lineKind: DiffLineKind;
 	lineNumber: string;
 	content: string;
+	hashlineAnchorContent?: string;
 } | null {
+	const hashlineAnchorMatch = line.match(HASHLINE_ANCHOR_LINE_PATTERN);
+	if (hashlineAnchorMatch) {
+		const lineNumber = hashlineAnchorMatch[2] ?? "";
+		const hash = hashlineAnchorMatch[3] ?? "";
+		const content = hashlineAnchorMatch[4] ?? "";
+		const parsed = toParsedDiffLine(
+			hashlineAnchorMatch[1] ?? " ",
+			lineNumber,
+			content,
+		);
+		return {
+			...parsed,
+			hashlineAnchorContent: `${lineNumber.trim()}#${hash}:${content}`,
+		};
+	}
+
 	const canonicalMatch = line.match(CANONICAL_LINE_PATTERN);
 	const legacyMatch = canonicalMatch ? null : line.match(LEGACY_LINE_PATTERN);
 	const matched = canonicalMatch ?? legacyMatch;
@@ -329,16 +330,11 @@ function parseCanonicalDiffLine(line: string): {
 		return null;
 	}
 
-	const prefix = matched[1] ?? " ";
-	const lineNumber = (matched[2] ?? "").trim();
-	const content = matched[3] ?? "";
-	if (prefix === "+") {
-		return { lineKind: "add", lineNumber, content };
-	}
-	if (prefix === "-") {
-		return { lineKind: "remove", lineNumber, content };
-	}
-	return { lineKind: "context", lineNumber, content };
+	return toParsedDiffLine(
+		matched[1] ?? " ",
+		matched[2] ?? "",
+		matched[3] ?? "",
+	);
 }
 
 function toNumber(value: string | undefined): number | null {
@@ -390,6 +386,27 @@ function classifyMetaLine(raw: string): DiffMetaEntry["kind"] {
 		return "file";
 	}
 	return "meta";
+}
+
+function pushParsedLineEntry(
+	entries: ParsedDiffEntry[],
+	lineKind: DiffLineKind,
+	oldLineNumber: number | null,
+	newLineNumber: number | null,
+	fallbackLineNumber: string,
+	rawLine: string,
+	hunkIndex: number,
+): void {
+	entries.push({
+		kind: "line",
+		lineKind,
+		oldLineNumber,
+		newLineNumber,
+		fallbackLineNumber,
+		content: rawLine.slice(1),
+		raw: rawLine,
+		hunkIndex,
+	});
 }
 
 function createMetaEntry(raw: string, hunkIndex: number): DiffMetaEntry {
@@ -501,6 +518,7 @@ function parseDiff(diffText: string): ParsedDiff {
 				newLineNumber,
 				fallbackLineNumber: canonical.lineNumber,
 				content: canonical.content,
+				hashlineAnchorContent: canonical.hashlineAnchorContent,
 				raw: rawLine,
 				hunkIndex,
 			});
@@ -516,16 +534,15 @@ function parseDiff(diffText: string): ParsedDiff {
 				oldLineCursor++;
 			}
 			lineNumberDelta--;
-			entries.push({
-				kind: "line",
-				lineKind: "remove",
+			pushParsedLineEntry(
+				entries,
+				"remove",
 				oldLineNumber,
-				newLineNumber: null,
-				fallbackLineNumber: oldLineNumber !== null ? `${oldLineNumber}` : "",
-				content: rawLine.slice(1),
-				raw: rawLine,
+				null,
+				oldLineNumber !== null ? `${oldLineNumber}` : "",
+				rawLine,
 				hunkIndex,
-			});
+			);
 			continue;
 		}
 
@@ -538,16 +555,15 @@ function parseDiff(diffText: string): ParsedDiff {
 				newLineCursor++;
 			}
 			lineNumberDelta++;
-			entries.push({
-				kind: "line",
-				lineKind: "add",
-				oldLineNumber: null,
+			pushParsedLineEntry(
+				entries,
+				"add",
+				null,
 				newLineNumber,
-				fallbackLineNumber: newLineNumber !== null ? `${newLineNumber}` : "",
-				content: rawLine.slice(1),
-				raw: rawLine,
+				newLineNumber !== null ? `${newLineNumber}` : "",
+				rawLine,
 				hunkIndex,
-			});
+			);
 			continue;
 		}
 
@@ -563,16 +579,15 @@ function parseDiff(diffText: string): ParsedDiff {
 			if (newLineCursor !== null) {
 				newLineCursor++;
 			}
-			entries.push({
-				kind: "line",
-				lineKind: "context",
+			pushParsedLineEntry(
+				entries,
+				"context",
 				oldLineNumber,
 				newLineNumber,
-				fallbackLineNumber: oldLineNumber !== null ? `${oldLineNumber}` : newLineNumber !== null ? `${newLineNumber}` : "",
-				content: rawLine.slice(1),
-				raw: rawLine,
+				oldLineNumber !== null ? `${oldLineNumber}` : newLineNumber !== null ? `${newLineNumber}` : "",
+				rawLine,
 				hunkIndex,
-			});
+			);
 			continue;
 		}
 
@@ -596,12 +611,30 @@ function parseDiff(diffText: string): ParsedDiff {
 	return { entries, stats };
 }
 
-function getLineNumberWidth(entries: ParsedDiffEntry[]): number {
+function getHashlineAnchorLabel(entry: DiffLineEntry): string | undefined {
+	if (!entry.hashlineAnchorContent) {
+		return undefined;
+	}
+	const separatorIndex = entry.hashlineAnchorContent.indexOf(":");
+	return separatorIndex >= 0
+		? entry.hashlineAnchorContent.slice(0, separatorIndex)
+		: entry.hashlineAnchorContent;
+}
+
+function getLineNumberWidth(entries: ParsedDiffEntry[], showHashlineAnchors = false): number {
 	let maxWidth = MIN_LINE_NUMBER_WIDTH;
 
 	for (const entry of entries) {
 		if (entry.kind !== "line") {
 			continue;
+		}
+
+		if (showHashlineAnchors) {
+			const anchorLabel = getHashlineAnchorLabel(entry);
+			if (anchorLabel) {
+				maxWidth = Math.max(maxWidth, visibleWidth(anchorLabel));
+				continue;
+			}
 		}
 
 		const candidates = [
@@ -631,6 +664,20 @@ function formatLineNumber(value: number | null, fallback: string, width: number)
 	return " ".repeat(width);
 }
 
+function formatLineNumberLabel(
+	entry: DiffLineEntry,
+	value: number | null,
+	fallback: string,
+	width: number,
+	showHashlineAnchors: boolean,
+): string {
+	const anchorLabel = showHashlineAnchors ? getHashlineAnchorLabel(entry) : undefined;
+	if (anchorLabel) {
+		return fitToWidth(anchorLabel, width);
+	}
+	return formatLineNumber(value, fallback, width);
+}
+
 function formatMetaEntryRows(entry: DiffMetaEntry, width: number, theme: DiffTheme, wordWrap: boolean): RenderedRow[] {
 	const normalized = sanitizeAnsiForThemedOutput(normalizeCodeWhitespace(entry.raw));
 	const lines = wordWrap
@@ -653,6 +700,24 @@ function formatMetaEntryRows(entry: DiffMetaEntry, width: number, theme: DiffThe
 	}));
 }
 
+function collectConsecutiveLineEntries(
+	entries: ParsedDiffEntry[],
+	startIndex: number,
+	lineKind: DiffLineKind,
+): { collected: DiffLineEntry[]; nextIndex: number } {
+	const collected: DiffLineEntry[] = [];
+	let index = startIndex;
+	while (index < entries.length) {
+		const candidate = entries[index];
+		if (!candidate || candidate.kind !== "line" || candidate.lineKind !== lineKind) {
+			break;
+		}
+		collected.push(candidate);
+		index++;
+	}
+	return { collected, nextIndex: index };
+}
+
 function buildSplitRows(entries: ParsedDiffEntry[]): SplitDiffRow[] {
 	const rows: SplitDiffRow[] = [];
 	let index = 0;
@@ -670,25 +735,11 @@ function buildSplitRows(entries: ParsedDiffEntry[]): SplitDiffRow[] {
 		}
 
 		if (entry.lineKind === "remove") {
-			const removed: DiffLineEntry[] = [];
-			while (index < entries.length) {
-				const candidate = entries[index];
-				if (!candidate || candidate.kind !== "line" || candidate.lineKind !== "remove") {
-					break;
-				}
-				removed.push(candidate);
-				index++;
-			}
-
-			const added: DiffLineEntry[] = [];
-			while (index < entries.length) {
-				const candidate = entries[index];
-				if (!candidate || candidate.kind !== "line" || candidate.lineKind !== "add") {
-					break;
-				}
-				added.push(candidate);
-				index++;
-			}
+			const removedResult = collectConsecutiveLineEntries(entries, index, "remove");
+			const removed = removedResult.collected;
+			const addedResult = collectConsecutiveLineEntries(entries, removedResult.nextIndex, "add");
+			const added = addedResult.collected;
+			index = addedResult.nextIndex;
 
 			const pairCount = Math.max(removed.length, added.length);
 			for (let pairIndex = 0; pairIndex < pairCount; pairIndex++) {
@@ -912,6 +963,12 @@ function computeInlineDiffSpans(leftLine: string, rightLine: string): { left: Di
 	};
 }
 
+function getCompactLineRenderContent(entry: DiffLineEntry, showHashlineAnchors: boolean): string {
+	return showHashlineAnchors && entry.hashlineAnchorContent
+		? entry.hashlineAnchorContent
+		: entry.content;
+}
+
 function buildInlineHighlightMap(rows: SplitDiffRow[]): WeakMap<DiffLineEntry, DiffSpan[]> {
 	const highlights = new WeakMap<DiffLineEntry, DiffSpan[]>();
 
@@ -1101,22 +1158,12 @@ function resolveDiffPalette(theme: DiffTheme): DiffPalette {
 	};
 }
 
-function getLineRowBackground(kind: DiffLineKind, palette: DiffPalette): string | undefined {
+function getLineBackground(kind: DiffLineKind, palette: DiffPalette, emphasis: boolean): string | undefined {
 	if (kind === "add") {
-		return palette.addRowBgAnsi;
+		return emphasis ? palette.addEmphasisBgAnsi : palette.addRowBgAnsi;
 	}
 	if (kind === "remove") {
-		return palette.removeRowBgAnsi;
-	}
-	return undefined;
-}
-
-function getLineEmphasisBackground(kind: DiffLineKind, palette: DiffPalette): string | undefined {
-	if (kind === "add") {
-		return palette.addEmphasisBgAnsi;
-	}
-	if (kind === "remove") {
-		return palette.removeEmphasisBgAnsi;
+		return emphasis ? palette.removeEmphasisBgAnsi : palette.removeRowBgAnsi;
 	}
 	return undefined;
 }
@@ -1291,7 +1338,18 @@ function renderChangeMarker(
 	return colorizeSegment(theme, "dim", glyph, rowBg);
 }
 
-function getLineDividerPlainWidth(indicatorMode: DiffIndicatorMode): number {
+function usesHashlineGutter(showHashlineAnchors: boolean): boolean {
+	return showHashlineAnchors;
+}
+
+function getHashlineGutterMarkerWidth(_indicatorMode: DiffIndicatorMode): number {
+	return 0;
+}
+
+function getLineDividerPlainWidth(indicatorMode: DiffIndicatorMode, hashlineGutter = false): number {
+	if (hashlineGutter) {
+		return 2;
+	}
 	return indicatorMode === "classic" ? 1 : 2;
 }
 
@@ -1299,8 +1357,9 @@ function renderCodeDivider(
 	theme: DiffTheme,
 	rowBg: string | undefined,
 	indicatorMode: DiffIndicatorMode,
+	hashlineGutter = false,
 ): string {
-	return colorizeSegment(theme, "dim", indicatorMode === "classic" ? "│" : "│ ", rowBg);
+	return colorizeSegment(theme, "dim", hashlineGutter || indicatorMode !== "classic" ? "│ " : "│", rowBg);
 }
 
 function getLineNumberColor(kind: DiffLineKind): "dim" | "toolDiffAdded" | "toolDiffRemoved" {
@@ -1322,7 +1381,10 @@ function renderLineNumberSegment(
 	return colorizeSegment(theme, getLineNumberColor(kind), lineNumber, rowBg);
 }
 
-function getLinePrefixPlainWidth(lineNumberWidth: number, indicatorMode: DiffIndicatorMode): number {
+function getLinePrefixPlainWidth(lineNumberWidth: number, indicatorMode: DiffIndicatorMode, hashlineGutter = false): number {
+	if (hashlineGutter) {
+		return getHashlineGutterMarkerWidth(indicatorMode) + lineNumberWidth;
+	}
 	return indicatorMode === "bars"
 		? visibleWidth(`▌ ${" ".repeat(lineNumberWidth)} `)
 		: visibleWidth(`${" ".repeat(lineNumberWidth)} `);
@@ -1355,8 +1417,12 @@ function renderLinePrefix(
 	rowBg: string | undefined,
 	indicatorMode: DiffIndicatorMode,
 	continuation = false,
+	hashlineGutter = false,
 ): string {
 	const number = renderLineNumberSegment(kind, lineNumber, theme, rowBg);
+	if (hashlineGutter) {
+		return number;
+	}
 	const spacer = rowBg ? `${rowBg} ` : " ";
 	if (indicatorMode !== "bars") {
 		return `${number}${spacer}`;
@@ -1371,9 +1437,10 @@ function renderLineContinuationPrefix(
 	rowBg: string | undefined,
 	theme: DiffTheme,
 	indicatorMode: DiffIndicatorMode,
+	hashlineGutter = false,
 ): string {
 	const blankLineNumber = " ".repeat(lineNumberWidth);
-	return renderLinePrefix(kind, blankLineNumber, theme, rowBg, indicatorMode, true);
+	return renderLinePrefix(kind, blankLineNumber, theme, rowBg, indicatorMode, true, hashlineGutter);
 }
 
 function renderLineContentIndicatorPrefix(
@@ -1400,7 +1467,47 @@ function renderCompactLinePrefix(
 	return `${marker}${spacer}`;
 }
 
-function renderCompactLineCell(
+interface LineCellRenderParams {
+	kind: DiffLineKind;
+	code: string;
+	width: number;
+	rowBg: string | undefined;
+	restoreBgAnsi: string | undefined;
+	theme: DiffTheme;
+	wordWrap: boolean;
+	indicatorMode: DiffIndicatorMode;
+}
+
+function renderWrappedRowsWithOptionalBackground(
+	wrappedCodeLines: string[],
+	buildRow: (index: number, wrappedCodeLine: string) => string,
+	width: number,
+	rowBg: string | undefined,
+	restoreBgAnsi: string | undefined,
+): string[] {
+	if (!rowBg) {
+		return wrappedCodeLines.map((wrappedCodeLine, index) =>
+			stabilizeBackgroundResets(buildRow(index, wrappedCodeLine)),
+		);
+	}
+	const safeRestoreBgAnsi = restoreBgAnsi ?? rowBg ?? ANSI_BG_RESET;
+	const visualRows = wrappedCodeLines.map((wrappedCodeLine, index) => buildRow(index, wrappedCodeLine));
+	return applyLineBackgroundToWrappedRows(visualRows, width, rowBg, safeRestoreBgAnsi);
+}
+
+function computeLineCellCodeWidth(
+	width: number,
+	lineNumberWidth: number,
+	indicatorMode: DiffIndicatorMode,
+	hashlineGutter: boolean,
+): number {
+	const prefixPlainWidth = getLinePrefixPlainWidth(lineNumberWidth, indicatorMode, hashlineGutter);
+	const dividerPlainWidth = getLineDividerPlainWidth(indicatorMode, hashlineGutter);
+	const contentIndicatorWidth = hashlineGutter ? 0 : getLineContentIndicatorPrefixPlainWidth(indicatorMode);
+	return Math.max(0, width - prefixPlainWidth - dividerPlainWidth - contentIndicatorWidth);
+}
+
+function buildLineCellParams(
 	kind: DiffLineKind,
 	code: string,
 	width: number,
@@ -1409,7 +1516,11 @@ function renderCompactLineCell(
 	theme: DiffTheme,
 	wordWrap: boolean,
 	indicatorMode: DiffIndicatorMode,
-): string[] {
+): LineCellRenderParams {
+	return { kind, code, width, rowBg, restoreBgAnsi, theme, wordWrap, indicatorMode };
+}
+
+function renderCompactLineCell({ kind, code, width, rowBg, restoreBgAnsi, theme, wordWrap, indicatorMode }: LineCellRenderParams): string[] {
 	if (width <= 0) {
 		return [""];
 	}
@@ -1419,127 +1530,121 @@ function renderCompactLineCell(
 	const prefixPlainWidth = 2;
 	const codeWidth = Math.max(0, width - prefixPlainWidth);
 	const wrappedCodeLines = wrapToWidth(code, codeWidth, wordWrap);
-
-	if (!rowBg) {
-		return wrappedCodeLines.map((wrappedCodeLine, index) =>
-			stabilizeBackgroundResets(`${index === 0 ? prefix : continuationPrefix}${wrappedCodeLine}`)
-		);
-	}
-
-	const safeRestoreBgAnsi = restoreBgAnsi ?? rowBg ?? ANSI_BG_RESET;
-	const visualRows = wrappedCodeLines.map((wrappedCodeLine, index) => {
-		const linePrefix = index === 0 ? prefix : continuationPrefix;
-		return `${linePrefix}${wrappedCodeLine}`;
-	});
-	return applyLineBackgroundToWrappedRows(visualRows, width, rowBg, safeRestoreBgAnsi);
+	return renderWrappedRowsWithOptionalBackground(
+		wrappedCodeLines,
+		(index, line) => `${index === 0 ? prefix : continuationPrefix}${line}`,
+		width,
+		rowBg,
+		restoreBgAnsi,
+	);
 }
 
 function renderLineCell(
-	kind: DiffLineKind,
+	{ kind, code, width, rowBg, restoreBgAnsi, theme, wordWrap, indicatorMode }: LineCellRenderParams,
 	lineNumber: string,
-	code: string,
-	width: number,
-	rowBg: string | undefined,
-	restoreBgAnsi: string | undefined,
-	theme: DiffTheme,
-	wordWrap: boolean,
-	indicatorMode: DiffIndicatorMode,
+	hashlineGutter = false,
 ): string[] {
 	if (width <= 0) {
 		return [""];
 	}
 
-	const prefixPlainWidth = getLinePrefixPlainWidth(lineNumber.length, indicatorMode);
-	const dividerPlainWidth = getLineDividerPlainWidth(indicatorMode);
-	const contentIndicatorWidth = getLineContentIndicatorPrefixPlainWidth(indicatorMode);
-	const codeWidth = Math.max(0, width - prefixPlainWidth - dividerPlainWidth - contentIndicatorWidth);
-	const prefix = renderLinePrefix(kind, lineNumber, theme, undefined, indicatorMode);
-	const continuationPrefix = renderLineContinuationPrefix(kind, lineNumber.length, undefined, theme, indicatorMode);
-	const divider = renderCodeDivider(theme, undefined, indicatorMode);
-	const firstContentPrefix = renderLineContentIndicatorPrefix(kind, theme, undefined, indicatorMode);
-	const continuationContentPrefix = renderLineContentIndicatorPrefix(kind, theme, undefined, indicatorMode, true);
+	const codeWidth = computeLineCellCodeWidth(width, lineNumber.length, indicatorMode, hashlineGutter);
+	const prefix = renderLinePrefix(kind, lineNumber, theme, undefined, indicatorMode, false, hashlineGutter);
+	const continuationPrefix = renderLineContinuationPrefix(kind, lineNumber.length, undefined, theme, indicatorMode, hashlineGutter);
+	const divider = renderCodeDivider(theme, undefined, indicatorMode, hashlineGutter);
+	const firstContentPrefix = hashlineGutter ? "" : renderLineContentIndicatorPrefix(kind, theme, undefined, indicatorMode);
+	const continuationContentPrefix = hashlineGutter ? "" : renderLineContentIndicatorPrefix(kind, theme, undefined, indicatorMode, true);
 	const wrappedCodeLines = wrapToWidth(code, codeWidth, wordWrap);
-
-	if (!rowBg) {
-		return wrappedCodeLines.map((wrappedCodeLine, index) =>
-			stabilizeBackgroundResets(
-				`${index === 0 ? prefix : continuationPrefix}${divider}${index === 0 ? firstContentPrefix : continuationContentPrefix}${wrappedCodeLine}`,
-			)
-		);
-	}
-
-	const safeRestoreBgAnsi = restoreBgAnsi ?? rowBg ?? ANSI_BG_RESET;
-	const visualRows = wrappedCodeLines.map((wrappedCodeLine, index) => {
-		const linePrefix = index === 0 ? prefix : continuationPrefix;
-		const contentPrefix = index === 0 ? firstContentPrefix : continuationContentPrefix;
-		return `${linePrefix}${divider}${contentPrefix}${wrappedCodeLine}`;
-	});
-	return applyLineBackgroundToWrappedRows(visualRows, width, rowBg, safeRestoreBgAnsi);
+	return renderWrappedRowsWithOptionalBackground(
+		wrappedCodeLines,
+		(index, line) => {
+			const linePrefix = index === 0 ? prefix : continuationPrefix;
+			const contentPrefix = index === 0 ? firstContentPrefix : continuationContentPrefix;
+			return `${linePrefix}${divider}${contentPrefix}${line}`;
+		},
+		width,
+		rowBg,
+		restoreBgAnsi,
+	);
 }
 
-function renderUnified(
-	entries: ParsedDiffEntry[],
-	width: number,
-	theme: DiffTheme,
-	lineNumberWidth: number,
+function highlightDiffLine(
+	codeText: string,
+	entry: DiffLineEntry,
 	inlineHighlights: WeakMap<DiffLineEntry, DiffSpan[]>,
 	palette: DiffPalette,
 	highlightLine: CodeLineHighlighter,
 	containerBgAnsi: string | undefined,
-	wordWrap: boolean,
-	indicatorMode: DiffIndicatorMode,
-): RenderedRow[] {
-	const rows: RenderedRow[] = [];
+): { highlighted: string; rowBg: string | undefined } {
+	const syntaxHighlighted = highlightLine(codeText);
+	const rowBg = getLineBackground(entry.lineKind, palette, false);
+	const emphasisBg = getLineBackground(entry.lineKind, palette, true);
+	const inlineSpans = inlineHighlights.get(entry) ?? [];
+	const highlighted = applyInlineSpanHighlight(codeText, syntaxHighlighted, inlineSpans, emphasisBg, rowBg, containerBgAnsi);
+	return { highlighted, rowBg };
+}
 
+function pushDiffLineRows(rows: RenderedRow[], lines: string[], entry: DiffLineEntry): void {
+	rows.push(
+		...lines.map((text) => ({
+			text,
+			hunkIndex: entry.hunkIndex || null,
+		})),
+	);
+}
+
+interface DiffRenderContext {
+	width: number;
+	theme: DiffTheme;
+	inlineHighlights: WeakMap<DiffLineEntry, DiffSpan[]>;
+	palette: DiffPalette;
+	highlightLine: CodeLineHighlighter;
+	containerBgAnsi: string | undefined;
+	wordWrap: boolean;
+	indicatorMode: DiffIndicatorMode;
+	showHashlineAnchors: boolean;
+}
+
+function processDiffEntries(
+	entries: ParsedDiffEntry[],
+	ctx: DiffRenderContext,
+	processLine: (entry: DiffLineEntry) => string[],
+): RenderedRow[] {
+	const { width, theme, wordWrap } = ctx;
+	const rows: RenderedRow[] = [];
 	for (const entry of entries) {
 		if (entry.kind !== "line") {
 			rows.push(...formatMetaEntryRows(entry, width, theme, wordWrap));
 			continue;
 		}
-
-		const lineNumber = entry.lineKind === "add"
-			? formatLineNumber(entry.newLineNumber, entry.fallbackLineNumber, lineNumberWidth)
-			: formatLineNumber(entry.oldLineNumber, entry.fallbackLineNumber, lineNumberWidth);
-		const codeText = normalizeCodeWhitespace(entry.content);
-		const syntaxHighlighted = highlightLine(codeText);
-		const rowBg = getLineRowBackground(entry.lineKind, palette);
-		const emphasisBg = getLineEmphasisBackground(entry.lineKind, palette);
-		const inlineSpans = inlineHighlights.get(entry) ?? [];
-		const highlighted = applyInlineSpanHighlight(codeText, syntaxHighlighted, inlineSpans, emphasisBg, rowBg, containerBgAnsi);
-		const lines = renderLineCell(
-			entry.lineKind,
-			lineNumber,
-			highlighted,
-			width,
-			rowBg,
-			containerBgAnsi,
-			theme,
-			wordWrap,
-			indicatorMode,
-		);
-
-		rows.push(
-			...lines.map((text) => ({
-				text,
-				hunkIndex: entry.hunkIndex || null,
-			})),
-		);
+		pushDiffLineRows(rows, processLine(entry), entry);
 	}
-
 	return rows;
+}
+
+function renderUnified(
+	entries: ParsedDiffEntry[],
+	ctx: DiffRenderContext,
+	lineNumberWidth: number,
+): RenderedRow[] {
+	return processDiffEntries(entries, ctx, (entry) => {
+		const lineNumber = entry.lineKind === "add"
+			? formatLineNumberLabel(entry, entry.newLineNumber, entry.fallbackLineNumber, lineNumberWidth, ctx.showHashlineAnchors)
+			: formatLineNumberLabel(entry, entry.oldLineNumber, entry.fallbackLineNumber, lineNumberWidth, ctx.showHashlineAnchors);
+		const codeText = normalizeCodeWhitespace(entry.content);
+		const { highlighted, rowBg } = highlightDiffLine(codeText, entry, ctx.inlineHighlights, ctx.palette, ctx.highlightLine, ctx.containerBgAnsi);
+		return renderLineCell(
+			buildLineCellParams(entry.lineKind, highlighted, ctx.width, rowBg, ctx.containerBgAnsi, ctx.theme, ctx.wordWrap, ctx.indicatorMode),
+			lineNumber,
+			usesHashlineGutter(ctx.showHashlineAnchors),
+		);
+	});
 }
 
 function toUnifiedFallbackRows(
 	rows: SplitDiffRow[],
-	width: number,
-	theme: DiffTheme,
+	ctx: DiffRenderContext,
 	lineNumberWidth: number,
-	inlineHighlights: WeakMap<DiffLineEntry, DiffSpan[]>,
-	palette: DiffPalette,
-	highlightLine: CodeLineHighlighter,
-	containerBgAnsi: string | undefined,
-	wordWrap: boolean,
-	indicatorMode: DiffIndicatorMode,
 ): RenderedRow[] {
 	const flattened: ParsedDiffEntry[] = [];
 	for (const row of rows) {
@@ -1554,65 +1659,18 @@ function toUnifiedFallbackRows(
 			flattened.push(row.right);
 		}
 	}
-	return renderUnified(
-		flattened,
-		width,
-		theme,
-		lineNumberWidth,
-		inlineHighlights,
-		palette,
-		highlightLine,
-		containerBgAnsi,
-		wordWrap,
-		indicatorMode,
-	);
+	return renderUnified(flattened, ctx, lineNumberWidth);
 }
 
 function renderCompact(
 	entries: ParsedDiffEntry[],
-	width: number,
-	theme: DiffTheme,
-	inlineHighlights: WeakMap<DiffLineEntry, DiffSpan[]>,
-	palette: DiffPalette,
-	highlightLine: CodeLineHighlighter,
-	containerBgAnsi: string | undefined,
-	wordWrap: boolean,
-	indicatorMode: DiffIndicatorMode,
+	ctx: DiffRenderContext,
 ): RenderedRow[] {
-	const rows: RenderedRow[] = [];
-
-	for (const entry of entries) {
-		if (entry.kind !== "line") {
-			rows.push(...formatMetaEntryRows(entry, width, theme, wordWrap));
-			continue;
-		}
-
-		const codeText = normalizeCodeWhitespace(entry.content);
-		const syntaxHighlighted = highlightLine(codeText);
-		const rowBg = getLineRowBackground(entry.lineKind, palette);
-		const emphasisBg = getLineEmphasisBackground(entry.lineKind, palette);
-		const inlineSpans = inlineHighlights.get(entry) ?? [];
-		const highlighted = applyInlineSpanHighlight(codeText, syntaxHighlighted, inlineSpans, emphasisBg, rowBg, containerBgAnsi);
-		const lines = renderCompactLineCell(
-			entry.lineKind,
-			highlighted,
-			width,
-			rowBg,
-			containerBgAnsi,
-			theme,
-			wordWrap,
-			indicatorMode,
-		);
-
-		rows.push(
-			...lines.map((text) => ({
-				text,
-				hunkIndex: entry.hunkIndex || null,
-			})),
-		);
-	}
-
-	return rows;
+	return processDiffEntries(entries, ctx, (entry) => {
+		const codeText = normalizeCodeWhitespace(getCompactLineRenderContent(entry, ctx.showHashlineAnchors));
+		const { highlighted, rowBg } = highlightDiffLine(codeText, entry, ctx.inlineHighlights, ctx.palette, ctx.highlightLine, ctx.containerBgAnsi);
+		return renderCompactLineCell(buildLineCellParams(entry.lineKind, highlighted, ctx.width, rowBg, ctx.containerBgAnsi, ctx.theme, ctx.wordWrap, ctx.indicatorMode));
+	});
 }
 
 function renderSplitBlankCell(
@@ -1620,14 +1678,12 @@ function renderSplitBlankCell(
 	lineNumberWidth: number,
 	theme: DiffTheme,
 	indicatorMode: DiffIndicatorMode,
+	hashlineGutter = false,
 ): string {
-	const prefixPlainWidth = getLinePrefixPlainWidth(lineNumberWidth, indicatorMode);
-	const dividerPlainWidth = getLineDividerPlainWidth(indicatorMode);
-	const contentIndicatorWidth = getLineContentIndicatorPrefixPlainWidth(indicatorMode);
-	const codeWidth = Math.max(0, columnWidth - prefixPlainWidth - dividerPlainWidth - contentIndicatorWidth);
-	const prefix = renderLinePrefix("context", " ".repeat(lineNumberWidth), theme, undefined, indicatorMode, true);
-	const divider = renderCodeDivider(theme, undefined, indicatorMode);
-	const contentPrefix = renderLineContentIndicatorPrefix("context", theme, undefined, indicatorMode, true);
+	const codeWidth = computeLineCellCodeWidth(columnWidth, lineNumberWidth, indicatorMode, hashlineGutter);
+	const prefix = renderLinePrefix("context", " ".repeat(lineNumberWidth), theme, undefined, indicatorMode, true, hashlineGutter);
+	const divider = renderCodeDivider(theme, undefined, indicatorMode, hashlineGutter);
+	const contentPrefix = hashlineGutter ? "" : renderLineContentIndicatorPrefix("context", theme, undefined, indicatorMode, true);
 	return stabilizeBackgroundResets(`${prefix}${divider}${contentPrefix}${" ".repeat(codeWidth)}`);
 }
 
@@ -1643,28 +1699,20 @@ function renderSplitCell(
 	containerBgAnsi: string | undefined,
 	wordWrap: boolean,
 	indicatorMode: DiffIndicatorMode,
+	showHashlineAnchors: boolean,
 ): string[] {
+	const hashlineGutter = usesHashlineGutter(showHashlineAnchors);
 	if (!line) {
-		return [renderSplitBlankCell(columnWidth, lineNumberWidth, theme, indicatorMode)];
+		return [renderSplitBlankCell(columnWidth, lineNumberWidth, theme, indicatorMode, hashlineGutter)];
 	}
 
-	const lineNumber = formatLineNumber(getCellLineNumber(line, side), line.fallbackLineNumber, lineNumberWidth);
-	const rowBg = getLineRowBackground(line.lineKind, palette);
-	const emphasisBg = getLineEmphasisBackground(line.lineKind, palette);
+	const lineNumber = formatLineNumberLabel(line, getCellLineNumber(line, side), line.fallbackLineNumber, lineNumberWidth, showHashlineAnchors);
 	const codeText = normalizeCodeWhitespace(line.content);
-	const syntaxHighlighted = highlightLine(codeText);
-	const inlineSpans = inlineHighlights.get(line) ?? [];
-	const highlighted = applyInlineSpanHighlight(codeText, syntaxHighlighted, inlineSpans, emphasisBg, rowBg, containerBgAnsi);
+	const { highlighted, rowBg } = highlightDiffLine(codeText, line, inlineHighlights, palette, highlightLine, containerBgAnsi);
 	return renderLineCell(
-		line.lineKind,
+		buildLineCellParams(line.lineKind, highlighted, columnWidth, rowBg, containerBgAnsi, theme, wordWrap, indicatorMode),
 		lineNumber,
-		highlighted,
-		columnWidth,
-		rowBg,
-		containerBgAnsi,
-		theme,
-		wordWrap,
-		indicatorMode,
+		hashlineGutter,
 	);
 }
 
@@ -1688,10 +1736,11 @@ function renderSplitTopBorderCell(
 	lineNumberWidth: number,
 	theme: DiffTheme,
 	indicatorMode: DiffIndicatorMode,
+	hashlineGutter = false,
 ): string {
 	const safeColumnWidth = Math.max(1, columnWidth);
 	const chars = "─".repeat(safeColumnWidth).split("");
-	const dividerIndex = getLinePrefixPlainWidth(lineNumberWidth, indicatorMode);
+	const dividerIndex = getLinePrefixPlainWidth(lineNumberWidth, indicatorMode, hashlineGutter);
 	if (dividerIndex >= 0 && dividerIndex < chars.length) {
 		chars[dividerIndex] = "┬";
 	}
@@ -1704,13 +1753,19 @@ function renderSplitHeaderCell(
 	lineNumberWidth: number,
 	theme: DiffTheme,
 	indicatorMode: DiffIndicatorMode,
+	hashlineGutter = false,
 ): string {
-	const markerPad = indicatorMode === "bars" ? "  " : "";
+	const markerPad = hashlineGutter
+		? " ".repeat(getHashlineGutterMarkerWidth(indicatorMode))
+		: indicatorMode === "bars" ? "  " : "";
 	const lineNumberLabel = fitToWidth(label, lineNumberWidth);
-	const prefix = `${theme.fg("dim", markerPad)}${theme.fg("muted", lineNumberLabel)}${theme.fg("dim", " │ ")}`;
-	const prefixWidth = visibleWidth(`${markerPad}${lineNumberLabel} │ `);
-	const codeWidth = Math.max(0, columnWidth - prefixWidth - getLineContentIndicatorPrefixPlainWidth(indicatorMode));
-	const contentPad = indicatorMode === "classic" ? "  " : "";
+	const lineNumberSpacer = hashlineGutter ? "" : " ";
+	const divider = hashlineGutter || indicatorMode !== "classic" ? "│ " : "│";
+	const prefix = `${theme.fg("dim", markerPad)}${theme.fg("muted", lineNumberLabel)}${theme.fg("dim", lineNumberSpacer)}${theme.fg("dim", divider)}`;
+	const prefixWidth = visibleWidth(`${markerPad}${lineNumberLabel}${lineNumberSpacer}${divider}`);
+	const contentIndicatorWidth = hashlineGutter ? 0 : getLineContentIndicatorPrefixPlainWidth(indicatorMode);
+	const codeWidth = Math.max(0, columnWidth - prefixWidth - contentIndicatorWidth);
+	const contentPad = !hashlineGutter && indicatorMode === "classic" ? "  " : "";
 	return stabilizeBackgroundResets(`${prefix}${contentPad}${" ".repeat(codeWidth)}`);
 }
 
@@ -1722,44 +1777,28 @@ function canRenderSplitLayout(width: number): boolean {
 
 function renderSplit(
 	rows: SplitDiffRow[],
-	width: number,
-	theme: DiffTheme,
+	ctx: DiffRenderContext,
 	lineNumberWidth: number,
-	inlineHighlights: WeakMap<DiffLineEntry, DiffSpan[]>,
-	palette: DiffPalette,
-	highlightLine: CodeLineHighlighter,
-	containerBgAnsi: string | undefined,
-	wordWrap: boolean,
-	indicatorMode: DiffIndicatorMode,
 ): RenderedRow[] {
+	const { width, theme, inlineHighlights, palette, highlightLine, containerBgAnsi, wordWrap, indicatorMode, showHashlineAnchors } = ctx;
 	if (!canRenderSplitLayout(width)) {
-		return toUnifiedFallbackRows(
-			rows,
-			width,
-			theme,
-			lineNumberWidth,
-			inlineHighlights,
-			palette,
-			highlightLine,
-			containerBgAnsi,
-			wordWrap,
-			indicatorMode,
-		);
+		return toUnifiedFallbackRows(rows, ctx, lineNumberWidth);
 	}
 
 	const separatorWidth = visibleWidth(SPLIT_SEPARATOR);
 	const leftWidth = Math.max(MIN_SPLIT_COLUMN_WIDTH, Math.floor((width - separatorWidth) / 2));
 	const rightWidth = Math.max(MIN_SPLIT_COLUMN_WIDTH, width - separatorWidth - leftWidth);
 	const splitLineNumberWidth = Math.max(3, lineNumberWidth);
+	const hashlineGutter = usesHashlineGutter(showHashlineAnchors);
 	const separator = renderSplitDivider(theme, containerBgAnsi);
 	const topSeparator = renderSplitDivider(theme, containerBgAnsi, "─┬─");
 	const output: RenderedRow[] = [];
 	output.push({
-		text: `${renderSplitTopBorderCell(leftWidth, splitLineNumberWidth, theme, indicatorMode)}${topSeparator}${renderSplitTopBorderCell(rightWidth, splitLineNumberWidth, theme, indicatorMode)}`,
+		text: `${renderSplitTopBorderCell(leftWidth, splitLineNumberWidth, theme, indicatorMode, hashlineGutter)}${topSeparator}${renderSplitTopBorderCell(rightWidth, splitLineNumberWidth, theme, indicatorMode, hashlineGutter)}`,
 		hunkIndex: null,
 	});
 	output.push({
-		text: `${renderSplitHeaderCell("old", leftWidth, splitLineNumberWidth, theme, indicatorMode)}${separator}${renderSplitHeaderCell("new", rightWidth, splitLineNumberWidth, theme, indicatorMode)}`,
+		text: `${renderSplitHeaderCell("old", leftWidth, splitLineNumberWidth, theme, indicatorMode, hashlineGutter)}${separator}${renderSplitHeaderCell("new", rightWidth, splitLineNumberWidth, theme, indicatorMode, hashlineGutter)}`,
 		hunkIndex: null,
 	});
 
@@ -1781,6 +1820,7 @@ function renderSplit(
 			containerBgAnsi,
 			wordWrap,
 			indicatorMode,
+			showHashlineAnchors,
 		);
 		const rightCells = renderSplitCell(
 			row.right,
@@ -1794,12 +1834,13 @@ function renderSplit(
 			containerBgAnsi,
 			wordWrap,
 			indicatorMode,
+			showHashlineAnchors,
 		);
 
 		const rowCount = Math.max(leftCells.length, rightCells.length);
 		for (let index = 0; index < rowCount; index++) {
-			const leftCell = leftCells[index] ?? renderSplitBlankCell(leftWidth, splitLineNumberWidth, theme, indicatorMode);
-			const rightCell = rightCells[index] ?? renderSplitBlankCell(rightWidth, splitLineNumberWidth, theme, indicatorMode);
+			const leftCell = leftCells[index] ?? renderSplitBlankCell(leftWidth, splitLineNumberWidth, theme, indicatorMode, hashlineGutter);
+			const rightCell = rightCells[index] ?? renderSplitBlankCell(rightWidth, splitLineNumberWidth, theme, indicatorMode, hashlineGutter);
 			output.push({ text: `${leftCell}${separator}${rightCell}`, hunkIndex: row.hunkIndex });
 		}
 	}
@@ -1828,27 +1869,27 @@ function renderDiffStatBar(stats: DiffStats, width: number, theme: DiffTheme): s
 	return stabilizeBackgroundResets(`${theme.fg("dim", "[")}${addedBar}${removedBar}${theme.fg("dim", "]")}`);
 }
 
+function buildDiffSummaryBasePieces(stats: DiffStats, theme: DiffTheme): string[] {
+	return [
+		theme.fg("toolOutput", `↳ ${emphasis(theme, "diff")}`),
+		theme.fg("toolDiffAdded", `+${stats.added}`),
+		theme.fg("toolDiffRemoved", `-${stats.removed}`),
+	];
+}
+
 function renderHeaderRows(stats: DiffStats, mode: Exclude<DiffPresentationMode, "summary">, width: number, theme: DiffTheme): RenderedRow[] {
 	if (mode === "compact") {
-		const summary = [
-			theme.fg("toolOutput", `↳ ${emphasis(theme, "diff")}`),
-			theme.fg("toolDiffAdded", `+${stats.added}`),
-			theme.fg("toolDiffRemoved", `-${stats.removed}`),
-		].join(" ");
+		const summary = buildDiffSummaryBasePieces(stats, theme).join(" ");
 		return [{ text: stabilizeBackgroundResets(truncateToWidth(summary, width)), hunkIndex: null }];
 	}
 
 	const summaryPieces = mode === "split"
 		? [
-			theme.fg("toolOutput", `↳ ${emphasis(theme, "diff")}`),
-			theme.fg("toolDiffAdded", `+${stats.added}`),
-			theme.fg("toolDiffRemoved", `-${stats.removed}`),
+			...buildDiffSummaryBasePieces(stats, theme),
 			theme.fg("muted", mode),
 		]
 		: [
-			theme.fg("toolOutput", `↳ ${emphasis(theme, "diff")}`),
-			theme.fg("toolDiffAdded", `+${stats.added}`),
-			theme.fg("toolDiffRemoved", `-${stats.removed}`),
+			...buildDiffSummaryBasePieces(stats, theme),
 			theme.fg("muted", `${stats.hunks} ${pluralize(stats.hunks, "hunk")}`),
 			theme.fg("muted", `${stats.files} ${pluralize(stats.files, "file")}`),
 			theme.fg("muted", mode),
@@ -1889,15 +1930,18 @@ function applyLineLimit(
 	width: number,
 	expanded: boolean,
 	maxCollapsedLines: number,
+	maxExpandedLines: number,
 	totalHunks: number,
 	theme: DiffTheme,
 ): string[] {
-	if (expanded) {
-		return rows.map((row) => clampDiffLineToWidth(row.text, width));
-	}
-
-	const limit = Math.max(1, maxCollapsedLines);
-	if (rows.length <= limit) {
+	const expandedLimit = Number.isFinite(maxExpandedLines)
+		? maxExpandedLines
+		: DEFAULT_TOOL_DISPLAY_CONFIG.expandedPreviewMaxLines;
+	const collapsedLimit = Number.isFinite(maxCollapsedLines)
+		? maxCollapsedLines
+		: DEFAULT_TOOL_DISPLAY_CONFIG.diffCollapsedLines;
+	const limit = expanded ? Math.max(0, expandedLimit) : Math.max(1, collapsedLimit);
+	if (limit === 0 || rows.length <= limit) {
 		return rows.map((row) => clampDiffLineToWidth(row.text, width));
 	}
 
@@ -1921,7 +1965,7 @@ function applyLineLimit(
 	return [
 		...shown.map((row) => clampDiffLineToWidth(row.text, width)),
 		renderDiffSpacerLine(width),
-		clampDiffLineToWidth(theme.fg("muted", hintText), width),
+		clampDiffLineToWidth(theme.fg(expanded ? "warning" : "muted", hintText), width),
 	];
 }
 
@@ -1976,16 +2020,11 @@ function collectDiffStats(entries: ParsedDiffEntry[], fallbackHunks = 0, fallbac
 	return stats;
 }
 
-function renderSummaryRows(stats: DiffStats, width: number, theme: DiffTheme): string[] {
+function renderSingleDiffRow(text: string, color: string, width: number, theme: DiffTheme): string[] {
 	if (width <= 0) {
 		return [""];
 	}
-	return [
-		clampDiffLineToWidth(
-			stabilizeBackgroundResets(theme.fg("toolOutput", buildDiffSummaryText(stats, width))),
-			width,
-		),
-	];
+	return [clampDiffLineToWidth(stabilizeBackgroundResets(theme.fg(color, text)), width)];
 }
 
 function safeGetDiff(details: unknown): string {
@@ -1994,6 +2033,35 @@ function safeGetDiff(details: unknown): string {
 	}
 	const typed = details as Partial<EditToolDetails>;
 	return typeof typed.diff === "string" ? typed.diff : "";
+}
+
+function createDiffRenderCache() {
+	let cachedWidth: number | undefined;
+	let cachedExpanded: boolean | undefined;
+	let cachedMode: DiffPresentationMode | undefined;
+	let cachedLines: string[] | undefined;
+
+	return {
+		get(width: number, expanded: boolean, mode: DiffPresentationMode): string[] | undefined {
+			if (cachedLines && cachedWidth === width && cachedExpanded === expanded && cachedMode === mode) {
+				return cachedLines;
+			}
+			return undefined;
+		},
+		set(width: number, expanded: boolean, mode: DiffPresentationMode, lines: string[]): string[] {
+			cachedWidth = width;
+			cachedExpanded = expanded;
+			cachedMode = mode;
+			cachedLines = lines;
+			return lines;
+		},
+		invalidate(): void {
+			cachedWidth = undefined;
+			cachedExpanded = undefined;
+			cachedMode = undefined;
+			cachedLines = undefined;
+		},
+	};
 }
 
 export function renderEditDiffResult(
@@ -2024,8 +2092,9 @@ export function renderEditDiffResult(
 	}
 
 	const splitRows = buildSplitRows(parsed.entries);
-	const inlineHighlights = buildInlineHighlightMap(splitRows);
-	const lineNumberWidth = getLineNumberWidth(parsed.entries);
+	const showHashlineAnchors = options.expanded === true
+		&& parsed.entries.some((entry) => entry.kind === "line" && !!entry.hashlineAnchorContent);
+	const lineNumberWidth = getLineNumberWidth(parsed.entries, showHashlineAnchors);
 	const palette = resolveDiffPalette(theme);
 	const containerBgAnsi = resolveContainerBackgroundAnsi(theme);
 	const language = resolveLanguageFromPath(options.filePath);
@@ -2033,75 +2102,45 @@ export function renderEditDiffResult(
 	const wordWrap = config.diffWordWrap;
 	const indicatorMode = resolveDiffIndicatorMode(config);
 
-	let cachedWidth: number | undefined;
-	let cachedExpanded: boolean | undefined;
-	let cachedMode: DiffPresentationMode | undefined;
-	let cachedLines: string[] | undefined;
+	const cache = createDiffRenderCache();
 
 	return {
 		render(width: number): string[] {
 			const safeWidth = normalizeDiffRenderWidth(width);
 			const mode = resolveDiffPresentationMode(config, safeWidth, canRenderSplitLayout(safeWidth));
-			if (
-				cachedLines
-				&& cachedWidth === safeWidth
-				&& cachedExpanded === options.expanded
-				&& cachedMode === mode
-			) {
-				return cachedLines;
+			const cached = cache.get(safeWidth, options.expanded, mode);
+			if (cached) {
+				return cached;
 			}
 
 			if (mode === "summary") {
-				cachedLines = clampDiffLinesToWidth(renderSummaryRows(parsed.stats, safeWidth, theme), safeWidth);
-				cachedWidth = safeWidth;
-				cachedExpanded = options.expanded;
-				cachedMode = mode;
-				return cachedLines;
+				return cache.set(safeWidth, options.expanded, mode, clampDiffLinesToWidth(renderSingleDiffRow(buildDiffSummaryText(parsed.stats, safeWidth), "toolOutput", safeWidth, theme), safeWidth));
 			}
 
 			const headerRows = renderHeaderRows(parsed.stats, mode, safeWidth, theme);
+			const inlineHighlights = buildInlineHighlightMap(splitRows);
 			const bodyRows = mode === "split"
 				? renderSplit(
 					splitRows,
-					safeWidth,
-					theme,
+					{ width: safeWidth, theme, inlineHighlights, palette, highlightLine, containerBgAnsi, wordWrap, indicatorMode, showHashlineAnchors },
 					lineNumberWidth,
-					inlineHighlights,
-					palette,
-					highlightLine,
-					containerBgAnsi,
-					wordWrap,
-					indicatorMode,
 				)
 				: mode === "compact"
 					? renderCompact(
 						parsed.entries,
-						safeWidth,
-						theme,
-						inlineHighlights,
-						palette,
-						highlightLine,
-						containerBgAnsi,
-						wordWrap,
-						indicatorMode,
+						{ width: safeWidth, theme, inlineHighlights, palette, highlightLine, containerBgAnsi, wordWrap, indicatorMode, showHashlineAnchors },
 					)
 					: renderUnified(
 						parsed.entries,
-						safeWidth,
-						theme,
+						{ width: safeWidth, theme, inlineHighlights, palette, highlightLine, containerBgAnsi, wordWrap, indicatorMode, showHashlineAnchors },
 						lineNumberWidth,
-						inlineHighlights,
-						palette,
-						highlightLine,
-						containerBgAnsi,
-						wordWrap,
-						indicatorMode,
 					);
 			const bodyWithLimit = applyLineLimit(
 				bodyRows,
 				safeWidth,
 				options.expanded,
 				config.diffCollapsedLines,
+				config.expandedPreviewMaxLines,
 				parsed.stats.hunks,
 				theme,
 			);
@@ -2110,32 +2149,11 @@ export function renderEditDiffResult(
 				? [...headerRows.map((row) => row.text), frame, ...bodyWithLimit, frame]
 				: [...headerRows.map((row) => row.text), ...bodyWithLimit];
 
-			cachedLines = clampDiffLinesToWidth(renderedLines, safeWidth);
-			cachedWidth = safeWidth;
-			cachedExpanded = options.expanded;
-			cachedMode = mode;
-			return cachedLines;
+			const clampedLines = clampDiffLinesToWidth(renderedLines, safeWidth);
+			return cache.set(safeWidth, options.expanded, mode, clampedLines);
 		},
-		invalidate() {
-			cachedWidth = undefined;
-			cachedExpanded = undefined;
-			cachedMode = undefined;
-			cachedLines = undefined;
-		},
+		invalidate: cache.invalidate,
 	};
-}
-
-function splitWriteContentLines(content: string): string[] {
-	if (!content) {
-		return [];
-	}
-
-	const normalized = content.replace(/\r/g, "");
-	const lines = normalized.split("\n");
-	if (lines.length > 0 && lines[lines.length - 1] === "") {
-		lines.pop();
-	}
-	return lines;
 }
 
 function renderWriteHeader(
@@ -2369,15 +2387,7 @@ function renderWriteOverwriteGuardRows(
 	width: number,
 	theme: DiffTheme,
 ): string[] {
-	if (width <= 0) {
-		return [""];
-	}
-	return [
-		clampDiffLineToWidth(
-			stabilizeBackgroundResets(theme.fg("warning", buildWriteOverwriteGuardText(guard, width))),
-			width,
-		),
-	];
+	return renderSingleDiffRow(buildWriteOverwriteGuardText(guard, width), "warning", width, theme);
 }
 
 export function renderWriteDiffResult(
@@ -2416,10 +2426,7 @@ export function renderWriteDiffResult(
 	const indicatorMode = resolveDiffIndicatorMode(config);
 
 	let detailedData: WriteDiffData | undefined;
-	let cachedWidth: number | undefined;
-	let cachedExpanded: boolean | undefined;
-	let cachedMode: DiffPresentationMode | undefined;
-	let cachedLines: string[] | undefined;
+	const cache = createDiffRenderCache();
 
 	function getDetailedData(): WriteDiffData {
 		if (detailedData) {
@@ -2441,13 +2448,9 @@ export function renderWriteDiffResult(
 				: resolvedMode === "split"
 					? "unified"
 					: resolvedMode;
-			if (
-				cachedLines
-				&& cachedWidth === safeWidth
-				&& cachedExpanded === options.expanded
-				&& cachedMode === mode
-			) {
-				return cachedLines;
+			const cached = cache.get(safeWidth, options.expanded, mode);
+			if (cached) {
+				return cached;
 			}
 
 			const header = renderWriteHeader(
@@ -2457,66 +2460,40 @@ export function renderWriteDiffResult(
 				options.headerLabel,
 			);
 			if (overwriteGuard) {
-				cachedLines = clampDiffLinesToWidth(
+				return cache.set(safeWidth, options.expanded, mode, clampDiffLinesToWidth(
 					[header, ...renderWriteOverwriteGuardRows(overwriteGuard, safeWidth, theme)],
 					safeWidth,
-				);
-				cachedWidth = safeWidth;
-				cachedExpanded = options.expanded;
-				cachedMode = mode;
-				return cachedLines;
+				));
 			}
 
 			if (mode === "summary") {
 				const summaryRows = approximateStats.lines === 0
 					? [header]
-					: [header, ...renderSummaryRows(approximateStats, safeWidth, theme)];
-				cachedLines = clampDiffLinesToWidth(summaryRows, safeWidth);
-				cachedWidth = safeWidth;
-				cachedExpanded = options.expanded;
-				cachedMode = mode;
-				return cachedLines;
+					: [header, ...renderSingleDiffRow(buildDiffSummaryText(approximateStats, safeWidth), "toolOutput", safeWidth, theme)];
+				return cache.set(safeWidth, options.expanded, mode, clampDiffLinesToWidth(summaryRows, safeWidth));
 			}
 
 			const data = getDetailedData();
+			const renderCtx: DiffRenderContext = {
+				width: safeWidth, theme, inlineHighlights: data.inlineHighlights, palette, highlightLine, containerBgAnsi, wordWrap, indicatorMode, showHashlineAnchors: false,
+			};
 			const bodyRows: RenderedRow[] = data.entries.length === 0
 				? [{ text: theme.fg("muted", "(empty file)"), hunkIndex: null }]
 				: mode === "split"
 					? renderSplit(
 						data.splitRows,
-						safeWidth,
-						theme,
+						renderCtx,
 						data.lineNumberWidth,
-						data.inlineHighlights,
-						palette,
-						highlightLine,
-						containerBgAnsi,
-						wordWrap,
-						indicatorMode,
 					)
 					: mode === "compact"
 						? renderCompact(
 							data.entries,
-							safeWidth,
-							theme,
-							data.inlineHighlights,
-							palette,
-							highlightLine,
-							containerBgAnsi,
-							wordWrap,
-							indicatorMode,
+							renderCtx,
 						)
 						: renderUnified(
 							data.entries,
-							safeWidth,
-							theme,
+							renderCtx,
 							data.lineNumberWidth,
-							data.inlineHighlights,
-							palette,
-							highlightLine,
-							containerBgAnsi,
-							wordWrap,
-							indicatorMode,
 						);
 
 			const bodyWithLimit = applyLineLimit(
@@ -2524,6 +2501,7 @@ export function renderWriteDiffResult(
 				safeWidth,
 				options.expanded,
 				config.diffCollapsedLines,
+				config.expandedPreviewMaxLines,
 				data.hunkCount,
 				theme,
 			);
@@ -2531,17 +2509,9 @@ export function renderWriteDiffResult(
 			const renderedLines = mode === "unified"
 				? [header, frame, ...bodyWithLimit, frame]
 				: [header, ...bodyWithLimit];
-			cachedLines = clampDiffLinesToWidth(renderedLines, safeWidth);
-			cachedWidth = safeWidth;
-			cachedExpanded = options.expanded;
-			cachedMode = mode;
-			return cachedLines;
+			const finalLines = clampDiffLinesToWidth(renderedLines, safeWidth);
+			return cache.set(safeWidth, options.expanded, mode, finalLines);
 		},
-		invalidate() {
-			cachedWidth = undefined;
-			cachedExpanded = undefined;
-			cachedMode = undefined;
-			cachedLines = undefined;
-		},
+		invalidate: cache.invalidate,
 	};
 }

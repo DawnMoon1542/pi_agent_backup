@@ -7,50 +7,84 @@ cd "$SCRIPT_DIR"
 REMOTE_URL="https://github.com/MasuRii/pi-tool-display.git"
 BRANCH="main"
 
-# 备份 config.json
-if [ -f config.json ]; then
-  cp config.json config.json.bak
-  echo "==> Backed up config.json"
-fi
+PATCH_FILE="$SCRIPT_DIR/local.patch"
+BACKUP_DIR="$SCRIPT_DIR/.update-backup"
 
+cleanup() {
+  rm -f "$PATCH_FILE"
+  rm -rf "$BACKUP_DIR"
+}
+trap cleanup EXIT
+
+# 备份本地修改的文件（兜底，patch 失败时手动恢复用）
+rm -rf "$BACKUP_DIR"
+mkdir -p "$BACKUP_DIR"
+
+files_to_backup=(
+  "src/index.ts"
+  "src/config-store.ts"
+  "config.json"
+  "update.sh"
+)
+
+for f in "${files_to_backup[@]}"; do
+  if [ -f "$f" ]; then
+    mkdir -p "$BACKUP_DIR/$(dirname "$f")"
+    cp "$f" "$BACKUP_DIR/$f"
+    echo "==> Backed up $f"
+  fi
+done
+
+# 用 git 提取本地修改与上游的差异
 echo "==> Initializing temporary git repo..."
 git init
-git remote add origin "$REMOTE_URL"
+git add -A
+git commit -m "local" --quiet
 
+git remote add origin "$REMOTE_URL"
 echo "==> Fetching $BRANCH from origin..."
-git fetch origin "$BRANCH"
+git fetch origin "$BRANCH" --quiet
+
+echo "==> Extracting local patch..."
+git diff "origin/$BRANCH"..HEAD -- "src/" "config.json" > "$PATCH_FILE"
+LOCAL_DIFF_SIZE=$(wc -c < "$PATCH_FILE" | tr -d ' ')
 
 echo "==> Resetting to origin/$BRANCH..."
-git reset --hard "origin/$BRANCH"
+git reset --hard "origin/$BRANCH" --quiet
 
 echo "==> Removing .git directory..."
 rm -rf .git
 
-# 恢复 config.json
-if [ -f config.json.bak ]; then
-  mv config.json.bak config.json
-  echo "==> Restored config.json"
+# 恢复 update.sh（上游不含此文件）
+if [ -f "$BACKUP_DIR/update.sh" ]; then
+  cp "$BACKUP_DIR/update.sh" "$SCRIPT_DIR/update.sh"
+  chmod +x "$SCRIPT_DIR/update.sh"
 fi
 
-echo "==> Applying local patches..."
+# 尝试应用本地修改
+if [ "$LOCAL_DIFF_SIZE" -gt 0 ]; then
+  echo "==> Re-applying local modifications..."
+  if git apply "$PATCH_FILE" 2>/dev/null; then
+    echo "==> Local modifications applied cleanly."
+  else
+    echo ""
+    echo "⚠️  CONFLICT: local modifications could not be applied cleanly."
+    echo "   Upstream changes in src/ conflict with local patches."
+    echo "   Upstream version has been applied."
+    echo "   Your local modifications are backed up at:"
+    for f in "${files_to_backup[@]}"; do
+      if [ -f "$BACKUP_DIR/$f" ]; then
+        echo "     $BACKUP_DIR/$f"
+      fi
+    done
+    echo "   The failed patch is at: $PATCH_FILE"
+    echo "   Resolve conflicts manually, then remove the backup directory."
+    trap - EXIT
+    echo ""
+    exit 1
+  fi
+else
+  echo "==> No local modifications to apply."
+fi
 
-# config 路径适配
-sed -i '' 's|"extensions", "pi-tool-display"|"extensions", "Appearance", "pi-tool-display"|g' src/config-store.ts
-
-# 注入 enableThinkingLabels 配置项
-sed -i '' 's|enableNativeUserMessageBox: boolean;|enableNativeUserMessageBox: boolean;\n\tenableThinkingLabels: boolean;|' src/types.ts
-sed -i '' 's|enableNativeUserMessageBox: true,|enableNativeUserMessageBox: true,\n\tenableThinkingLabels: true,|' src/types.ts
-
-# thinking-label 条件化注册
-sed -i '' 's|registerThinkingLabeling(pi);|if (config.enableThinkingLabels) {\n    registerThinkingLabeling(pi);\n  }|' src/index.ts
-
-# enableThinkingLabels 配置解析
-sed -i '' '/enableNativeUserMessageBox: toBoolean(/,/),/{
-  /),/a\
-\t\tenableThinkingLabels: toBoolean(\
-\t\t\t(source as Record<string, unknown>).enableThinkingLabels,\
-\t\t\tDEFAULT_TOOL_DISPLAY_CONFIG.enableThinkingLabels,\
-\t\t),
-}' src/config-store.ts
-
-echo "==> Done. Review changes with: git diff"
+echo "==> Done."

@@ -47,9 +47,22 @@ function buildConfig(overrides: Partial<ToolDisplayConfig>): ToolDisplayConfig {
 	};
 }
 
-function createExtensionApiStub(allTools: unknown[] = []): {
+function withDefaultReadEditOwners(tools: unknown[] = []): unknown[] {
+	const names = new Set(
+		tools
+			.map((tool) => (tool as { name?: unknown }).name)
+			.filter((name): name is string => typeof name === "string"),
+	);
+	const defaults = ["read", "edit"]
+		.filter((name) => !names.has(name))
+		.map((name) => ({ name, sourceInfo: { source: "builtin", path: `<builtin:${name}>` } }));
+	return [...defaults, ...tools];
+}
+
+function createExtensionApiStub(allTools: Array<RegisteredToolLike & Record<string, unknown>> = []): {
 	api: ExtensionAPI;
 	registeredTools: RegisteredToolLike[];
+	runtimeTools: Array<RegisteredToolLike & Record<string, unknown>>;
 	eventHandlers: ToolEventHandlers;
 } {
 	const registeredTools: RegisteredToolLike[] = [];
@@ -62,11 +75,16 @@ function createExtensionApiStub(allTools: unknown[] = []): {
 			eventHandlers[event] = handler;
 		},
 		getAllTools(): unknown[] {
-			return allTools;
+			return withDefaultReadEditOwners(allTools);
 		},
 	} as unknown as ExtensionAPI;
 
-	return { api, registeredTools, eventHandlers };
+	return { api, registeredTools, runtimeTools: allTools, eventHandlers };
+}
+
+async function runLifecycle(eventHandlers: ToolEventHandlers): Promise<void> {
+	await eventHandlers.session_start?.();
+	await eventHandlers.before_agent_start?.();
 }
 
 function createTheme(): RenderThemeLike {
@@ -138,7 +156,7 @@ test("current local-style config keeps read/search/MCP output modes distinct", a
 		searchOutputMode: "count",
 		mcpOutputMode: "summary",
 	});
-	const { api, registeredTools, eventHandlers } = createExtensionApiStub([
+	const { api, registeredTools, runtimeTools, eventHandlers } = createExtensionApiStub([
 		{
 			name: "mcp",
 			description: "Unified MCP gateway for status, discovery, reconnects, and proxy tool calls.",
@@ -150,9 +168,10 @@ test("current local-style config keeps read/search/MCP output modes distinct", a
 	]);
 
 	registerToolDisplayOverrides(api, () => config);
-	await eventHandlers.session_start?.();
+	await runLifecycle(eventHandlers);
 
 	const registeredNames = new Set(registeredTools.map((tool) => tool.name));
+	const mcpTool = runtimeTools.find((tool) => tool.name === "mcp");
 	assert.ok(registeredNames.has("read"));
 	assert.ok(registeredNames.has("grep"));
 	assert.ok(registeredNames.has("find"));
@@ -160,7 +179,7 @@ test("current local-style config keeps read/search/MCP output modes distinct", a
 	assert.ok(registeredNames.has("bash"));
 	assert.ok(registeredNames.has("edit"));
 	assert.ok(registeredNames.has("write"));
-	assert.ok(registeredNames.has("mcp"));
+	assert.ok(mcpTool?.renderResult);
 
 	assert.equal(
 		renderToolResult(registeredTools.find((tool) => tool.name === "read"), "alpha\nbeta\n"),
@@ -179,7 +198,7 @@ test("current local-style config keeps read/search/MCP output modes distinct", a
 		"↳ 2 entries returned • Ctrl+O to expand",
 	);
 	assert.equal(
-		renderToolResult(registeredTools.find((tool) => tool.name === "mcp"), "one\ntwo\n"),
+		renderToolResult(mcpTool, "one\ntwo\n"),
 		"↳ 2 lines returned • Ctrl+O to expand",
 	);
 	assert.equal(
@@ -197,7 +216,7 @@ test("current local-style config keeps read/search/MCP output modes distinct", a
 		"a.txt:1\nb.txt:2",
 	);
 	assert.equal(
-		renderToolResult(registeredTools.find((tool) => tool.name === "mcp"), {
+		renderToolResult(mcpTool, {
 			text: "one\ntwo\n",
 			expanded: true,
 		}),
@@ -206,7 +225,7 @@ test("current local-style config keeps read/search/MCP output modes distinct", a
 });
 
 test("registerToolDisplayOverrides preserves MCP prompt metadata for proxy and direct wrappers", async () => {
-	const { api, registeredTools, eventHandlers } = createExtensionApiStub([
+	const { api, runtimeTools, eventHandlers } = createExtensionApiStub([
 		{
 			name: "mcp",
 			description: "Unified MCP gateway for status, discovery, reconnects, and proxy tool calls.",
@@ -228,9 +247,9 @@ test("registerToolDisplayOverrides preserves MCP prompt metadata for proxy and d
 	]);
 
 	registerToolDisplayOverrides(api, () => DEFAULT_TOOL_DISPLAY_CONFIG);
-	await eventHandlers.session_start?.();
+	await runLifecycle(eventHandlers);
 
-	const byName = new Map(registeredTools.map((tool) => [tool.name, tool]));
+	const byName = new Map(runtimeTools.map((tool) => [tool.name, tool]));
 	assert.equal(
 		byName.get("mcp")?.promptSnippet,
 		"Discover, inspect, and call MCP tools across configured servers",
@@ -245,7 +264,7 @@ test("registerToolDisplayOverrides preserves MCP prompt metadata for proxy and d
 	assert.equal(byName.get("exa_web_search_exa")?.promptGuidelines, undefined);
 });
 
-test("read-only ownership keeps summary line counts confined to read", () => {
+test("read-only ownership keeps summary line counts confined to read", async () => {
 	const config = buildConfig({
 		registerToolOverrides: {
 			read: true,
@@ -258,9 +277,10 @@ test("read-only ownership keeps summary line counts confined to read", () => {
 		},
 		readOutputMode: "summary",
 	});
-	const { api, registeredTools } = createExtensionApiStub();
+	const { api, registeredTools, eventHandlers } = createExtensionApiStub();
 
 	registerToolDisplayOverrides(api, () => config);
+	await eventHandlers.before_agent_start?.();
 
 	assert.deepEqual(
 		registeredTools.map((tool) => tool.name),
@@ -279,7 +299,7 @@ test("showTruncationHints=false suppresses backend truncation summaries across r
 		mcpOutputMode: "summary",
 		showTruncationHints: false,
 	});
-	const { api, registeredTools, eventHandlers } = createExtensionApiStub([
+	const { api, registeredTools, runtimeTools, eventHandlers } = createExtensionApiStub([
 		{
 			name: "mcp",
 			description: "Unified MCP gateway for status, discovery, reconnects, and proxy tool calls.",
@@ -291,7 +311,8 @@ test("showTruncationHints=false suppresses backend truncation summaries across r
 	]);
 
 	registerToolDisplayOverrides(api, () => config);
-	await eventHandlers.session_start?.();
+	await runLifecycle(eventHandlers);
+	const mcpTool = runtimeTools.find((tool) => tool.name === "mcp");
 
 	assert.equal(
 		renderToolResult(registeredTools.find((tool) => tool.name === "read"), {
@@ -308,7 +329,7 @@ test("showTruncationHints=false suppresses backend truncation summaries across r
 		"↳ 1 match returned • Ctrl+O to expand",
 	);
 	assert.equal(
-		renderToolResult(registeredTools.find((tool) => tool.name === "mcp"), {
+		renderToolResult(mcpTool, {
 			text: "alpha\n",
 			details: { truncation: { truncated: true } },
 		}),
@@ -324,7 +345,7 @@ test("showRtkCompactionHints stays independent from showTruncationHints for summ
 		showTruncationHints: false,
 		showRtkCompactionHints: true,
 	});
-	const { api, registeredTools, eventHandlers } = createExtensionApiStub([
+	const { api, registeredTools, runtimeTools, eventHandlers } = createExtensionApiStub([
 		{
 			name: "mcp",
 			description: "Unified MCP gateway for status, discovery, reconnects, and proxy tool calls.",
@@ -342,7 +363,8 @@ test("showRtkCompactionHints stays independent from showTruncationHints for summ
 	};
 
 	registerToolDisplayOverrides(api, () => config);
-	await eventHandlers.session_start?.();
+	await runLifecycle(eventHandlers);
+	const mcpTool = runtimeTools.find((tool) => tool.name === "mcp");
 
 	assert.match(
 		renderToolResult(registeredTools.find((tool) => tool.name === "read"), {
@@ -359,7 +381,7 @@ test("showRtkCompactionHints stays independent from showTruncationHints for summ
 		/compacted by RTK • trimmed context/,
 	);
 	assert.match(
-		renderToolResult(registeredTools.find((tool) => tool.name === "mcp"), {
+		renderToolResult(mcpTool, {
 			text: "alpha\n",
 			details: rtkDetails,
 		}),
@@ -376,7 +398,7 @@ test("showRtkCompactionHints stays independent from showTruncationHints for prev
 		showTruncationHints: false,
 		showRtkCompactionHints: true,
 	});
-	const { api, registeredTools, eventHandlers } = createExtensionApiStub([
+	const { api, registeredTools, runtimeTools, eventHandlers } = createExtensionApiStub([
 		{
 			name: "mcp",
 			description: "Unified MCP gateway for status, discovery, reconnects, and proxy tool calls.",
@@ -396,7 +418,8 @@ test("showRtkCompactionHints stays independent from showTruncationHints for prev
 	};
 
 	registerToolDisplayOverrides(api, () => config);
-	await eventHandlers.session_start?.();
+	await runLifecycle(eventHandlers);
+	const mcpTool = runtimeTools.find((tool) => tool.name === "mcp");
 
 	assert.match(
 		renderToolResult(registeredTools.find((tool) => tool.name === "read"), {
@@ -413,7 +436,7 @@ test("showRtkCompactionHints stays independent from showTruncationHints for prev
 		/compacted by RTK: trimmed context • 1\/10 lines kept/,
 	);
 	assert.match(
-		renderToolResult(registeredTools.find((tool) => tool.name === "mcp"), {
+		renderToolResult(mcpTool, {
 			text: "alpha\nbeta\n",
 			details: rtkDetails,
 		}),
@@ -421,7 +444,7 @@ test("showRtkCompactionHints stays independent from showTruncationHints for prev
 	);
 });
 
-test("bash output modes stay distinct across opencode, summary, and preview", () => {
+test("bash output modes stay distinct across opencode, summary, and preview", async () => {
 	const output = "alpha\nbeta\ngamma\n";
 
 	const opencodeConfig = buildConfig({
@@ -430,6 +453,7 @@ test("bash output modes stay distinct across opencode, summary, and preview", ()
 	});
 	const opencodeStub = createExtensionApiStub();
 	registerToolDisplayOverrides(opencodeStub.api, () => opencodeConfig);
+	await opencodeStub.eventHandlers.before_agent_start?.();
 	assert.equal(
 		renderToolResult(opencodeStub.registeredTools.find((tool) => tool.name === "bash"), output),
 		"alpha\n... (2 more lines • Ctrl+O to expand)",
@@ -441,6 +465,7 @@ test("bash output modes stay distinct across opencode, summary, and preview", ()
 	});
 	const summaryStub = createExtensionApiStub();
 	registerToolDisplayOverrides(summaryStub.api, () => summaryConfig);
+	await summaryStub.eventHandlers.before_agent_start?.();
 	assert.equal(
 		renderToolResult(summaryStub.registeredTools.find((tool) => tool.name === "bash"), output),
 		"↳ 3 lines returned • Ctrl+O to expand",
@@ -460,6 +485,7 @@ test("bash output modes stay distinct across opencode, summary, and preview", ()
 	});
 	const previewStub = createExtensionApiStub();
 	registerToolDisplayOverrides(previewStub.api, () => previewConfig);
+	await previewStub.eventHandlers.before_agent_start?.();
 	assert.equal(
 		renderToolResult(previewStub.registeredTools.find((tool) => tool.name === "bash"), output),
 		"alpha\nbeta\n... (1 more line • Ctrl+O to expand)",
@@ -470,8 +496,9 @@ test("bash call spinner appears only while execution is active", async () => {
 	const config = buildConfig({
 		bashOutputMode: "summary",
 	});
-	const { api, registeredTools } = createExtensionApiStub();
+	const { api, registeredTools, eventHandlers } = createExtensionApiStub();
 	registerToolDisplayOverrides(api, () => config);
+	await eventHandlers.before_agent_start?.();
 
 	const bashTool = registeredTools.find((tool) => tool.name === "bash");
 	const idle = renderToolCall(bashTool, { command: "npm test" });
@@ -492,7 +519,7 @@ test("bash call spinner appears only while execution is active", async () => {
 	);
 	assert.match(running.output, /^⠋ \$ npm test · 0s$/);
 
-	await new Promise((resolve) => setTimeout(resolve, 95));
+	await new Promise((resolve) => setTimeout(resolve, 220));
 	const animatedFrame = normalizeRenderedText(running.component);
 	assert.notEqual(animatedFrame, running.output);
 	assert.match(animatedFrame, /^⠙ \$ npm test · 0s$/);
@@ -511,12 +538,13 @@ test("bash call spinner appears only while execution is active", async () => {
 	assert.equal(complete.output, "$ npm test");
 });
 
-test("bash render keeps the running result area empty until output exists", () => {
+test("bash render keeps the running result area empty until output exists", async () => {
 	const config = buildConfig({
 		bashOutputMode: "summary",
 	});
-	const { api, registeredTools } = createExtensionApiStub();
+	const { api, registeredTools, eventHandlers } = createExtensionApiStub();
 	registerToolDisplayOverrides(api, () => config);
+	await eventHandlers.before_agent_start?.();
 
 	const bashTool = registeredTools.find((tool) => tool.name === "bash");
 	assert.equal(
@@ -525,13 +553,14 @@ test("bash render keeps the running result area empty until output exists", () =
 	);
 });
 
-test("bash render shows live partial output once streaming begins", () => {
+test("bash render shows live partial output once streaming begins", async () => {
 	const config = buildConfig({
 		bashOutputMode: "summary",
 		previewLines: 2,
 	});
-	const { api, registeredTools } = createExtensionApiStub();
+	const { api, registeredTools, eventHandlers } = createExtensionApiStub();
 	registerToolDisplayOverrides(api, () => config);
+	await eventHandlers.before_agent_start?.();
 
 	const bashTool = registeredTools.find((tool) => tool.name === "bash");
 	assert.equal(
@@ -543,14 +572,15 @@ test("bash render shows live partial output once streaming begins", () => {
 	);
 });
 
-test("bash live partial output respects opencode collapse settings", () => {
+test("bash live partial output respects opencode collapse settings", async () => {
 	const config = buildConfig({
 		bashOutputMode: "opencode",
 		bashCollapsedLines: 1,
 		previewLines: 4,
 	});
-	const { api, registeredTools } = createExtensionApiStub();
+	const { api, registeredTools, eventHandlers } = createExtensionApiStub();
 	registerToolDisplayOverrides(api, () => config);
+	await eventHandlers.before_agent_start?.();
 
 	const bashTool = registeredTools.find((tool) => tool.name === "bash");
 	assert.equal(
@@ -562,13 +592,14 @@ test("bash live partial output respects opencode collapse settings", () => {
 	);
 });
 
-test("bash errors render with an explicit failure header and preview", () => {
+test("bash errors render with an explicit failure header and preview", async () => {
 	const config = buildConfig({
 		bashOutputMode: "summary",
 		previewLines: 2,
 	});
-	const { api, registeredTools } = createExtensionApiStub();
+	const { api, registeredTools, eventHandlers } = createExtensionApiStub();
 	registerToolDisplayOverrides(api, () => config);
+	await eventHandlers.before_agent_start?.();
 
 	const bashTool = registeredTools.find((tool) => tool.name === "bash");
 	assert.equal(

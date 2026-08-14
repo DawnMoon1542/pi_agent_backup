@@ -39,12 +39,15 @@ test("detectToolDisplayCapabilities recognises MCP tools from v0.62.0 tool info 
 	assert.equal(capabilities.hasMcpTooling, true);
 });
 
-test("applyCapabilityConfigGuards hides MCP output when no MCP tooling is available", () => {
-	const guarded = applyCapabilityConfigGuards(DEFAULT_TOOL_DISPLAY_CONFIG, {
-		hasMcpTooling: false,
-		hasRtkOptimizer: true,
-	});
+test("applyCapabilityConfigGuards preserves MCP output when MCP tooling is not detected yet", () => {
+	const guarded = applyCapabilityConfigGuards(
+		{ ...DEFAULT_TOOL_DISPLAY_CONFIG, mcpOutputMode: "preview" },
+		{
+			hasMcpTooling: false,
+			hasRtkOptimizer: true,
+		},
+	);
 
-	assert.equal(guarded.mcpOutputMode, "hidden");
+	assert.equal(guarded.mcpOutputMode, "preview");
 	assert.equal(guarded.showRtkCompactionHints, DEFAULT_TOOL_DISPLAY_CONFIG.showRtkCompactionHints);
 });

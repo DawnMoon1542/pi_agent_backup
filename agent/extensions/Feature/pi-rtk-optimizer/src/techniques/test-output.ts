@@ -38,6 +38,8 @@ const FAILURE_START_PATTERNS = [
 	/test\s+\w+\s+\.\.\.\s*FAILED/,
 	/thread\s+'\w+'\s+panicked/,
 ];
+const FALLBACK_PASS_PATTERN = /(?:\b(?:ok|PASS)\b|[✓✔])/;
+const FALLBACK_FAIL_PATTERN = /(?:\b(?:FAIL|fail)\b|[✗✕])/;
 
 function isFailureStart(line: string): boolean {
 	return FAILURE_START_PATTERNS.some((pattern) => pattern.test(line));
@@ -82,10 +84,10 @@ export function aggregateTestOutput(output: string, command: string | undefined 
 
 	if (summary.passed === 0 && summary.failed === 0) {
 		for (const line of lines) {
-			if (line.match(/\b(ok|PASS|✓|✔)\b/)) {
+			if (FALLBACK_PASS_PATTERN.test(line)) {
 				summary.passed++;
 			}
-			if (line.match(/\b(FAIL|fail|✗|✕)\b/)) {
+			if (FALLBACK_FAIL_PATTERN.test(line)) {
 				summary.failed++;
 			}
 		}

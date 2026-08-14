@@ -1,4 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { isRecord } from "./tool-metadata.js";
+import { onReloadShutdown } from "./extension-lifecycle.js";
 
 interface ThemeLike {
   fg(color: string, text: string): string;
@@ -13,6 +15,9 @@ interface AssistantMessageLike {
 const THINKING_CHAT_PREFIX = "Thinking: ";
 const THINKING_LABEL_PREFIX_PATTERN = /^(?:thinking:\s*)+/i;
 const LEADING_ANSI_FRAGMENT_PATTERN = /^(?:\s*;?\d{1,3}(?:;\d{1,3})*m)+\s*/;
+const MAX_THINKING_CONTENT_DEPTH = 16;
+
+const registeredThinkingApis = new WeakSet<ExtensionAPI>();
 
 const OPENAI_REASONING_APIS = new Set([
   "openai-completions",
@@ -25,10 +30,6 @@ const ANTHROPIC_REASONING_APIS = new Set([
   "anthropic-responses",
   "anthropic-completions",
 ]);
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
 
 function normalizeApiName(api: unknown): string | undefined {
   if (typeof api !== "string") {
@@ -146,6 +147,49 @@ function isThinkingBlock(value: unknown): value is Record<string, unknown> & {
   return value.type === "thinking" && typeof value.thinking === "string";
 }
 
+function mapThinkingContentArray(
+  content: unknown[],
+  mapThinkingText: (text: string) => string,
+  depth = 0,
+  seen: WeakSet<object> = new WeakSet<object>(),
+): { content: unknown[]; changed: boolean } {
+  if (depth > MAX_THINKING_CONTENT_DEPTH || seen.has(content)) {
+    return { content, changed: false };
+  }
+
+  seen.add(content);
+  let changed = false;
+  const nextContent = content.map((block) => {
+    if (Array.isArray(block)) {
+      const nested = mapThinkingContentArray(
+        block,
+        mapThinkingText,
+        depth + 1,
+        seen,
+      );
+      if (nested.changed) {
+        changed = true;
+        return nested.content;
+      }
+      return block as unknown[];
+    }
+
+    if (!isThinkingBlock(block)) {
+      return block;
+    }
+
+    const nextThinking = mapThinkingText(block.thinking);
+    if (nextThinking === block.thinking) {
+      return block;
+    }
+
+    changed = true;
+    return { ...block, thinking: nextThinking };
+  });
+
+  return { content: changed ? nextContent : content, changed };
+}
+
 function withThinkingLabelsForDisplay(
   content: unknown,
   theme: ThemeLike | undefined,
@@ -154,22 +198,11 @@ function withThinkingLabelsForDisplay(
     return content;
   }
 
-  let changed = false;
-  const nextContent = content.map((block) => {
-    if (!isThinkingBlock(block)) {
-      return block;
-    }
+  const mapped = mapThinkingContentArray(content, (thinking) =>
+    prefixThinkingLine(thinking, theme),
+  );
 
-    const nextThinking = prefixThinkingLine(block.thinking, theme);
-    if (nextThinking === block.thinking) {
-      return block;
-    }
-
-    changed = true;
-    return { ...block, thinking: nextThinking };
-  });
-
-  return changed ? nextContent : content;
+  return mapped.changed ? mapped.content : content;
 }
 
 function sanitizeThinkingBlocksForContext(message: AssistantMessageLike): AssistantMessageLike {
@@ -177,22 +210,12 @@ function sanitizeThinkingBlocksForContext(message: AssistantMessageLike): Assist
     return message;
   }
 
-  let changed = false;
-  const nextContent = message.content.map((block) => {
-    if (!isThinkingBlock(block)) {
-      return block;
-    }
+  const mapped = mapThinkingContentArray(
+    message.content,
+    normalizeThinkingLineForContext,
+  );
 
-    const nextThinking = normalizeThinkingLineForContext(block.thinking);
-    if (nextThinking === block.thinking) {
-      return block;
-    }
-
-    changed = true;
-    return { ...block, thinking: nextThinking };
-  });
-
-  return changed ? { ...message, content: nextContent } : message;
+  return mapped.changed ? { ...message, content: mapped.content } : message;
 }
 
 function sanitizeContextMessages(messages: unknown): unknown {
@@ -200,8 +223,9 @@ function sanitizeContextMessages(messages: unknown): unknown {
     return messages;
   }
 
+  const messageList = messages as unknown[];
   let changed = false;
-  const nextMessages = messages.map((message) => {
+  const nextMessages = messageList.map((message) => {
     if (!isRecord(message) || message.role !== "assistant") {
       return message;
     }
@@ -215,7 +239,7 @@ function sanitizeContextMessages(messages: unknown): unknown {
     return message;
   });
 
-  return changed ? nextMessages : messages;
+  return changed ? nextMessages : messageList;
 }
 
 function prefixThinkingBlocksForDisplay(
@@ -249,37 +273,34 @@ function extractAssistantMessage(event: unknown): AssistantMessageLike | undefin
   return maybeMessage as AssistantMessageLike;
 }
 
-function handleThinkingMessageUpdateEvent(event: unknown, ctx: ExtensionContext | undefined): void {
+function processThinkingEvent(
+  event: unknown,
+  ctx: ExtensionContext | undefined,
+  notifyPrefix: string,
+): void {
   try {
     const message = extractAssistantMessage(event);
     if (!message) {
       return;
     }
-
-    // Render-only labeling: update the transient message_update payload while
-    // leaving canonical session/LLM context content untouched.
     prefixThinkingBlocksForDisplay(message, ctx?.ui?.theme);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Unknown error";
-    ctx?.ui?.notify(`Thinking label formatting failed: ${message}`, "warning");
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
+    ctx?.ui?.notify(`${notifyPrefix}: ${errorMessage}`, "warning");
   }
 }
 
-function handleThinkingMessageEndEvent(event: unknown, ctx: ExtensionContext | undefined): void {
-  try {
-    const message = extractAssistantMessage(event);
-    if (!message) {
-      return;
-    }
+function handleThinkingMessageUpdateEvent(event: unknown, ctx: ExtensionContext | undefined): void {
+  // Render-only labeling: update the transient message_update payload while
+  // leaving canonical session/LLM context content untouched.
+  processThinkingEvent(event, ctx, "Thinking label formatting failed");
+}
 
-    // Persist themed labels on final assistant messages so the label remains
-    // visible after streaming ends and across session reloads.
-    // Context sanitization strips these presentation artifacts before each LLM call.
-    prefixThinkingBlocksForDisplay(message, ctx?.ui?.theme);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Unknown error";
-    ctx?.ui?.notify(`Thinking label finalization failed: ${message}`, "warning");
-  }
+function handleThinkingMessageEndEvent(event: unknown, ctx: ExtensionContext | undefined): void {
+  // Persist themed labels on final assistant messages so the label remains
+  // visible after streaming ends and across session reloads.
+  // Context sanitization strips these presentation artifacts before each LLM call.
+  processThinkingEvent(event, ctx, "Thinking label finalization failed");
 }
 
 function handleThinkingContextEvent(event: unknown, ctx: ExtensionContext | undefined): void {
@@ -290,7 +311,7 @@ function handleThinkingContextEvent(event: unknown, ctx: ExtensionContext | unde
 
     const sanitizedMessages = sanitizeContextMessages(event.messages);
     if (sanitizedMessages !== event.messages && Array.isArray(sanitizedMessages)) {
-      event.messages.splice(0, event.messages.length, ...sanitizedMessages);
+      event.messages.splice(0, event.messages.length, ...(sanitizedMessages as unknown[]));
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
@@ -299,6 +320,15 @@ function handleThinkingContextEvent(event: unknown, ctx: ExtensionContext | unde
 }
 
 export function registerThinkingLabeling(pi: ExtensionAPI): void {
+  if (registeredThinkingApis.has(pi)) {
+    return;
+  }
+  registeredThinkingApis.add(pi);
+
+  onReloadShutdown(pi, () => {
+    registeredThinkingApis.delete(pi);
+  });
+
   pi.on("message_update", async (event, ctx) => {
     handleThinkingMessageUpdateEvent(event, ctx);
   });

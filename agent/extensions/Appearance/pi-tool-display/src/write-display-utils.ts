@@ -3,17 +3,21 @@ export interface WriteCallSummaryOptions {
   hasDetailedResultHeader: boolean;
 }
 
-export function countWriteContentLines(value: unknown): number {
-  if (typeof value !== "string") {
-    return 0;
+export function splitWriteContentLines(content: string): string[] {
+  if (!content) {
+    return [];
   }
 
-  const normalized = value.replace(/\r/g, "");
+  const normalized = content.replace(/\r/g, "");
   const lines = normalized.split("\n");
   if (lines.length > 0 && lines[lines.length - 1] === "") {
     lines.pop();
   }
-  return lines.length;
+  return lines;
+}
+
+export function countWriteContentLines(value: unknown): number {
+  return typeof value === "string" ? splitWriteContentLines(value).length : 0;
 }
 
 export function getWriteContentSizeBytes(value: unknown): number {

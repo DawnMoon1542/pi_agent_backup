@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-03
+
+### Added
+- Added an `enabled` config toggle that gates tool override registration, with reload cleanup that disposes overrides and patches on `session_shutdown`. ([c78163d](https://github.com/MasuRii/pi-tool-display/commit/c78163dddc0f94b7a542d2d1e01109c903bc70cc))
+- Added regression coverage for the active backlog: expanded large-diff rendering in constrained tmux-style panes (#23) and the esbuild lockfile bump from PR #24. ([7e46231](https://github.com/MasuRii/pi-tool-display/commit/7e4623191583f31a056602d8a08f1a4a7accd8b6))
+
+### Changed
+- Widened Pi coding-agent and Pi TUI peer dependency ranges through `^0.80.0` and added a `postinstall` patch with npm `overrides` to resolve known vulnerabilities in transitive dependencies. ([5f753a9](https://github.com/MasuRii/pi-tool-display/commit/5f753a9407fca6c2a7463d90eede01ce056c7bbc))
+- Extracted render helpers and consolidated tool override logic to reduce inline duplication. ([3239d7a](https://github.com/MasuRii/pi-tool-display/commit/3239d7a825fe14e5cdcac86c75dd4b21aec0018c))
+- Updated the lockfile-resolved `esbuild` dependency from `0.28.0` to `0.28.1` via Dependabot PR #24. ([caf65f2](https://github.com/MasuRii/pi-tool-display/commit/caf65f209c49ddcfc8362ff95c58a6a91cd1ba03))
+- Updated README badge styling and added a ko-fi support button. ([2094fb6](https://github.com/MasuRii/pi-tool-display/commit/2094fb64ca4e79ff7d947d0f8be2f2d9ea967fe2))
+
+### Fixed
+- Capped expanded edit/write diff bodies with the existing `expandedPreviewMaxLines` setting and a visible omission hint so large diffs stay bounded in small tmux panes (#23). Thanks to @jmikedupont2 for reporting. ([7e46231](https://github.com/MasuRii/pi-tool-display/commit/7e4623191583f31a056602d8a08f1a4a7accd8b6))
+
+## [0.4.3] - 2026-06-16
+
+### Added
+- Added `customToolOverrides` for explicit opt-in rendering of non-built-in extension tools, with `generic` as the default kind and optional `mcp` rendering for MCP proxy-style arguments.
+- Added custom tool override coverage for malformed config, output modes, late tool registration, argument shapes, and runtime contract preservation.
+
+### Changed
+- Preserved configured MCP output mode even when MCP tools are not detected at startup, so dynamically registered MCP tools can still be decorated later.
+
+### Fixed
+- Bash tool display overrides now preserve Pi `settings.json` shell settings (`shellPath` and `shellCommandPrefix`) when rebuilding the bash tool.
+
+## [0.4.2] - 2026-06-01
+
+### Changed
+- Deferred config modal, settings inspector, and built-in tool metadata loading until needed to reduce startup work.
+- Replaced shared agent-directory lookup with a local `PI_CODING_AGENT_DIR`-aware resolver for config and capability checks.
+- Widened peer dependency ranges to `^0.74.0 || ^0.75.0 || ^0.77.0 || ^0.78.0`.
+
+### Fixed
+- Corrected classic-mode diff line-number gutter spacing.
+
+## [0.4.1] - 2026-05-26
+
+### Added
+- Reload-safe extension lifecycle: `src/disposable.ts` cleanup registry that disposes all tool overrides, prototype patches, timers, and event handlers on `session_shutdown(reason: "reload")`, preventing orphaned pi-mono default rendering after `/reload`.
+- Comprehensive test suite with 15 new test files covering reload behavior, bash display, MCP overrides, ANSI utilities, diff renderer edge cases, user message boxes, thinking labels, render utilities, and integration tests (696 total tests, up from 68).
+
+### Fixed
+- Bash display now respects `shellPath` and `commandPrefix` from `settings.json` when present (#21).
+- Bash spinner timer reworked to use toolCallId-keyed Map instead of `__piToolDisplayBashSpinner`, with interval reduced from 80ms to 200ms, defensive `invalidate()` check, and all timers registered in the cleanup registry (#19).
+- Bash override registration is now deferred (like read/grep/edit) and uses `before_agent_start` to discover ownership via `pi.getAllTools()` before overriding, preventing conflicts with other extensions (#17). Thanks to @iwinux for reporting.
+- `pi.registerTool` is now intercepted to decorate MCP tools as they register, eliminating a race condition where `session_start`/`before_agent_start` fire before `pi-mcp-adapter` finishes registering tools (#15, #18). Thanks to @dashanlkk for reporting and opening PR #18.
+- `isMcpToolCandidate()` heuristics expanded to match `mcp`, `mcp_*`, `*_mcp`, names containing `server:` or starting with `ctx_`, and parameter schemas containing `mcpServer`, `serverUrl`, or `server_name`, catching many MCP servers that were previously false negatives.
+- `stripBackgroundSgrParams()` now correctly preserves foreground RGB sequences like `38;2;12;49;200m` instead of misinterpreting color component `49` as a background reset (#8, #3). Thanks to @michaelrommel for the patch and @w-winter for reporting.
+- `patchUserMessageRenderPrototype` now restores stale patches from prior extension instances before re-patching, and `registerNativeUserMessageBox` has a duplicate-prevention guard with `session_shutdown` restoration (#10). OSC 133 stripping is now scoped to prompt-control sequences only; OSC 8 hyperlinks are preserved. Thanks to @w-winter for reporting.
+- Thinking label duplicate-prevention guard prevents re-registering event handlers across reloads; `session_shutdown(reason: "reload")` resets the guard so re-registration works after reload; recursive nested-array handling added for malformed thinking content (#2). Thanks to @agustif for PR #2.
+- `registerDeferredBuiltInToolOverrides()` is now also called on `session_start` (not just `before_agent_start`), fixing a reload bug where read/grep/edit/bash tools fell back to default pi-mono rendering.
+
+## [0.4.0] - 2026-05-22
+
+### Added
+- Added the `./tool-display-api-consumer` subpath export so other extensions can decorate tool definitions through the runtime tool-display API or queue decorations until `pi-tool-display` is loaded.
+- Added hashline-anchor-aware diff rendering so read/edit anchor lines can display their `LINE#HASH` labels in the diff gutter.
+
+### Changed
+- Deferred built-in tool override registration until the built-in owner is available and refreshed cached built-in tools on session lifecycle changes.
+- Redacted secret-like debug payload values and switched debug writes to asynchronous buffered file logging.
+
 ## [0.3.6] - 2026-05-04
 
 ### Added
@@ -33,7 +97,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added preview fallback notices when projected edit previews cannot be resolved deterministically from the current file contents
 
 ### Changed
-- Updated `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui` peer dependencies to `^0.70.2`
+- Updated `@mariozechner/pi-coding-agent` and `@mariozechner/pi-tui` peer dependencies to `^0.70.2`
 - Diff renderer write headers now support contextual action labels so pending previews can display `pending edit`, `pending overwrite`, and `pending create`
 
 ### Fixed
@@ -47,7 +111,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Config modal dropdown for diff indicator style selection under "Diff indicators" setting
 
 ### Changed
-- Updated `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui` peer dependencies to `^0.67.2`
+- Updated `@mariozechner/pi-coding-agent` and `@mariozechner/pi-tui` peer dependencies to `^0.67.2`
 - Config path resolution now uses `getAgentDir()` API to correctly respect `PI_CODING_AGENT_DIR` environment variable (thanks to @tynanbe for PR #6)
 - Diff renderer now supports mode-aware indicator glyph resolution (bars, classic, none)
 - Line prefix width calculations adjusted per indicator mode for accurate diff column alignment
@@ -76,7 +140,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `applyLineBackgroundToWidth()` helper for consistent line background handling in diff renderer
 
 ### Changed
-- Updated `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui` peer dependencies to ^0.64.0
+- Updated `@mariozechner/pi-coding-agent` and `@mariozechner/pi-tui` peer dependencies to ^0.64.0
 - Refactored tool-overrides to use context-based argument extraction instead of closure state
 - Improved diff renderer width handling with cleaner background reset logic
 - Simplified continuation prefix rendering by removing unnecessary row background parameters
@@ -129,7 +193,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keywords for better npm discoverability: `hide`, `collapse`, `truncate`, `compact`, `diff`, `output-mode`
 
 ### Changed
-- Updated `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui` peer dependencies to ^0.62.0
+- Updated `@mariozechner/pi-coding-agent` and `@mariozechner/pi-tui` peer dependencies to ^0.62.0
 - Extracted shared utilities to dedicated `tool-metadata.ts` module for reuse across capabilities and tool-overrides
 - Refactored tool-overrides to preserve `promptSnippet` and `promptGuidelines` on overridden read, edit, and write tools
 - Improved diff renderer with accurate line number tracking and line number delta calculation for proper hunk tracking

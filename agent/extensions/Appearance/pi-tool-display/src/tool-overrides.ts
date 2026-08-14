@@ -1,3 +1,5 @@
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import type {
   BashToolDetails,
   EditToolDetails,
@@ -20,8 +22,10 @@ import {
   formatSize,
 } from "@earendil-works/pi-coding-agent";
 import { Container, Spacer, Text } from "@earendil-works/pi-tui";
+import { resolvePiAgentDir } from "./agent-dir.js";
 import { renderBashCall } from "./bash-display.js";
 import { logToolDisplayDebug } from "./debug-logger.js";
+import { registerCleanup } from "./disposable.js";
 import {
   compactOutputLines,
   countNonEmptyLines,
@@ -49,8 +53,11 @@ import {
   MCP_PROXY_PROMPT_SNIPPET,
   toRecord,
 } from "./tool-metadata.js";
+import { BUILT_IN_TOOL_OVERRIDE_NAMES } from "./types.js";
+import { toCustomToolOverrideKind, toCustomToolOutputMode, normalizeCustomToolOverrideEntry } from "./config-store.js";
 import type {
   BuiltInToolOverrideName,
+  CustomToolOverrideConfig,
   ToolDisplayConfig,
 } from "./types.js";
 import {
@@ -71,7 +78,18 @@ interface BuiltInTools {
 
 type ConfigGetter = () => ToolDisplayConfig;
 
-type RuntimeToolDefinition = Record<string, unknown>;
+interface RuntimeToolDefinition {
+  name?: string;
+  label?: string;
+  description?: string;
+  parameters?: unknown;
+  prepareArguments?: unknown;
+  renderCall?: (args: Record<string, unknown>, theme: RenderTheme, context?: ToolRenderContextLike) => unknown;
+  renderResult?: (result: Record<string, unknown>, options: ToolRenderResultOptions, theme: RenderTheme, context?: ToolRenderContextLike) => unknown;
+  execute?: (toolCallId: string, params: Record<string, unknown>, signal: AbortSignal | undefined, onUpdate: unknown, ctx: { cwd: string }) => Promise<unknown>;
+  renderShell?: unknown;
+  [key: string]: unknown;
+}
 
 interface RenderTheme {
   fg(color: string, text: string): string;
@@ -92,6 +110,8 @@ interface ToolRenderContextLike {
   args?: unknown;
   toolCallId?: string;
   state?: unknown;
+  cwd?: string;
+  argsComplete?: boolean;
   isError?: boolean;
   isPartial?: boolean;
   expanded?: boolean;
@@ -107,6 +127,16 @@ interface PendingDiffPreviewState {
   data?: PendingDiffPreviewData;
 }
 
+interface PiSettingsShellConfig {
+  shellPath?: unknown;
+  shellCommandPrefix?: unknown;
+}
+
+interface BashToolOverrideOptions {
+  shellPath?: string;
+  commandPrefix?: string;
+}
+
 const builtInToolCache = new Map<string, BuiltInTools>();
 const RTK_COMPACTION_LABEL = "compacted by RTK";
 export const WRITE_EXECUTION_META_LIMIT = 100;
@@ -114,27 +144,126 @@ const WRITE_EXECUTION_META_STATE_KEY = "__piToolDisplayWriteExecutionMeta";
 const EDIT_PENDING_PREVIEW_STATE_KEY = "__piToolDisplayEditPendingPreview";
 const WRITE_PENDING_PREVIEW_STATE_KEY = "__piToolDisplayWritePendingPreview";
 
+const TOOL_DISPLAY_API_KEY = Symbol.for("pi-tool-display.api.v1");
+const TOOL_DISPLAY_PENDING_DECORATIONS_KEY = Symbol.for("pi-tool-display.pendingDecorations.v1");
+const TOOL_DISPLAY_REGISTER_TOOL_INTERCEPTOR_KEY = Symbol.for("pi-tool-display.registerToolInterceptor.v1");
+const TOOL_DISPLAY_DECORATED_PROPERTIES = [
+  "renderCall",
+  "renderResult",
+  "renderShell",
+  "label",
+  "description",
+  "promptSnippet",
+  "promptGuidelines",
+  "parameters",
+  "prepareArguments",
+] as const;
+
+type ToolDisplayKind = "read" | "edit" | "mcp" | "generic";
+
+export interface ToolDisplayAdapter {
+  id?: string;
+  toolName?: string;
+  kind?: ToolDisplayKind;
+  overrideExistingRenderers?: boolean;
+  pathFields?: string[];
+  getPath?: (args: unknown) => string | undefined;
+  getEditLineCount?: (args: unknown) => number;
+  renderCall?: (args: unknown, theme: RenderTheme, context: ToolRenderContextLike) => unknown;
+  renderResult?: (result: unknown, options: ToolRenderResultOptions, theme: RenderTheme, context?: ToolRenderContextLike) => unknown;
+}
+
+export interface ToolDisplayApi {
+  version: 1;
+  decorateTool<T extends RuntimeToolDefinition>(tool: T, adapter?: ToolDisplayAdapter): T;
+  registerAdapter(adapter: ToolDisplayAdapter): string;
+  unregisterAdapter(id: string): boolean;
+}
+
+interface PendingToolDisplayDecoration {
+  tool: RuntimeToolDefinition;
+  adapter?: ToolDisplayAdapter;
+}
+
+type DecoratedPropertyName = typeof TOOL_DISPLAY_DECORATED_PROPERTIES[number];
+type ToolPropertyDescriptorSnapshot = Partial<Record<DecoratedPropertyName, PropertyDescriptor>>;
+
+type GlobalWithToolDisplayApi = typeof globalThis & {
+  [TOOL_DISPLAY_API_KEY]?: ToolDisplayApi;
+  [TOOL_DISPLAY_PENDING_DECORATIONS_KEY]?: PendingToolDisplayDecoration[];
+};
+
+type PiWithRegisterToolInterception = ExtensionAPI & {
+  [TOOL_DISPLAY_REGISTER_TOOL_INTERCEPTOR_KEY]?: {
+    original: ExtensionAPI["registerTool"];
+    wrapped: ExtensionAPI["registerTool"];
+  };
+};
+
+const decoratedToolDescriptors = new WeakMap<RuntimeToolDefinition, ToolPropertyDescriptorSnapshot>();
+const decoratedTools = new Set<RuntimeToolDefinition>();
+
 function registerRuntimeTool(pi: ExtensionAPI, tool: RuntimeToolDefinition): void {
   pi.registerTool(tool as unknown as ToolDefinition);
 }
+
+function captureToolPropertyDescriptors(
+  tool: RuntimeToolDefinition,
+  descriptorSnapshots: WeakMap<RuntimeToolDefinition, ToolPropertyDescriptorSnapshot>,
+  decoratedTools: Set<RuntimeToolDefinition>,
+): void {
+  if (descriptorSnapshots.has(tool)) {
+    return;
+  }
+
+  const snapshot: ToolPropertyDescriptorSnapshot = {};
+  for (const property of TOOL_DISPLAY_DECORATED_PROPERTIES) {
+    const descriptor = Object.getOwnPropertyDescriptor(tool, property);
+    if (descriptor) {
+      snapshot[property] = descriptor;
+    }
+  }
+  descriptorSnapshots.set(tool, snapshot);
+  decoratedTools.add(tool);
+}
+
+function restoreToolPropertyDescriptors(
+  descriptorSnapshots: WeakMap<RuntimeToolDefinition, ToolPropertyDescriptorSnapshot>,
+  decoratedTools: Set<RuntimeToolDefinition>,
+): void {
+  for (const tool of decoratedTools) {
+    const snapshot = descriptorSnapshots.get(tool) ?? {};
+    for (const property of TOOL_DISPLAY_DECORATED_PROPERTIES) {
+      const descriptor = snapshot[property];
+      if (descriptor) {
+        Object.defineProperty(tool, property, descriptor);
+      } else {
+        delete tool[property];
+      }
+    }
+    descriptorSnapshots.delete(tool);
+  }
+  decoratedTools.clear();
+}
+
 
 function getToolPrepareArguments(tool: unknown): unknown {
   const prepareArguments = toRecord(tool).prepareArguments;
   return typeof prepareArguments === "function" ? prepareArguments : undefined;
 }
 
-function cloneToolParameters<T>(parameters: T, seen = new WeakMap<object, unknown>()): T {
+function cloneToolParameters(parameters: unknown, seen = new WeakMap<object, unknown>()): unknown {
   if (parameters === null || typeof parameters !== "object") {
     return parameters;
   }
 
   if (seen.has(parameters)) {
-    return seen.get(parameters) as T;
+    return seen.get(parameters);
   }
 
-  const clone = Array.isArray(parameters)
+  const clone: object = Array.isArray(parameters)
     ? []
-    : Object.create(Object.getPrototypeOf(parameters));
+    : Object.create(Object.getPrototypeOf(parameters) as object | null) as object;
   seen.set(parameters, clone);
 
   for (const key of Reflect.ownKeys(parameters)) {
@@ -144,30 +273,97 @@ function cloneToolParameters<T>(parameters: T, seen = new WeakMap<object, unknow
     }
 
     if ("value" in descriptor) {
-      descriptor.value = cloneToolParameters(descriptor.value, seen);
+      descriptor.value = cloneToolParameters(descriptor.value as unknown, seen);
     }
 
     Object.defineProperty(clone, key, descriptor);
   }
 
-  return clone as T;
+  return clone;
+}
+
+function clearBuiltInToolCache(): void {
+  builtInToolCache.clear();
+}
+
+function getStringSetting(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+}
+
+function loadBashToolOverrideOptions(): BashToolOverrideOptions {
+  const settingsPath = join(resolvePiAgentDir(), "settings.json");
+  if (!existsSync(settingsPath)) {
+    return {};
+  }
+
+  try {
+    const rawSettings = JSON.parse(readFileSync(settingsPath, "utf-8")) as PiSettingsShellConfig;
+    return {
+      shellPath: getStringSetting(rawSettings.shellPath),
+      commandPrefix: getStringSetting(rawSettings.shellCommandPrefix),
+    };
+  } catch (error) {
+    logToolDisplayDebug("Failed to read Pi settings for bash tool overrides.", error);
+    return {};
+  }
 }
 
 function getBuiltInTools(cwd: string): BuiltInTools {
   let tools = builtInToolCache.get(cwd);
   if (!tools) {
-    tools = {
-      read: createReadTool(cwd),
-      grep: createGrepTool(cwd),
-      find: createFindTool(cwd),
-      ls: createLsTool(cwd),
-      bash: createBashTool(cwd),
-      edit: createEditTool(cwd),
-      write: createWriteTool(cwd),
-    };
+    tools = createLazyBuiltInTools(cwd);
     builtInToolCache.set(cwd, tools);
   }
   return tools;
+}
+
+function createLazyBuiltInTools(cwd: string): BuiltInTools {
+  const cache = new Map<string, unknown>();
+  const get = <K extends keyof BuiltInTools>(name: K, factory: () => BuiltInTools[K]): BuiltInTools[K] => {
+    if (!cache.has(name)) {
+      cache.set(name, factory());
+    }
+    return cache.get(name) as BuiltInTools[K];
+  };
+  return {
+    get read() { return get("read", () => createReadTool(cwd)); },
+    get grep() { return get("grep", () => createGrepTool(cwd)); },
+    get find() { return get("find", () => createFindTool(cwd)); },
+    get ls() { return get("ls", () => createLsTool(cwd)); },
+    get bash() { return get("bash", () => createBashTool(cwd, loadBashToolOverrideOptions())); },
+    get edit() { return get("edit", () => createEditTool(cwd)); },
+    get write() { return get("write", () => createWriteTool(cwd)); },
+  } as BuiltInTools;
+}
+
+function createLazyToolRecord<T>(
+  bootstrapTools: BuiltInTools,
+  factory: (tool: BuiltInTools[keyof BuiltInTools]) => T,
+): Record<keyof BuiltInTools, T> {
+  const cache = new Map<string, unknown>();
+  const get = (name: keyof BuiltInTools): T => {
+    if (!cache.has(name)) {
+      cache.set(name, factory(bootstrapTools[name]));
+    }
+    return cache.get(name) as T;
+  };
+  return {
+    get read() { return get("read"); },
+    get grep() { return get("grep"); },
+    get find() { return get("find"); },
+    get ls() { return get("ls"); },
+    get bash() { return get("bash"); },
+    get edit() { return get("edit"); },
+    get write() { return get("write"); },
+  } as Record<keyof BuiltInTools, T>;
+}
+
+function createLazyPromptMetadata(bootstrapTools: BuiltInTools): Record<keyof BuiltInTools, ReturnType<typeof extractPromptMetadata>> {
+  return createLazyToolRecord(bootstrapTools, extractPromptMetadata);
+}
+
+function createLazyClonedParameters(bootstrapTools: BuiltInTools): Record<keyof BuiltInTools, unknown> {
+  return createLazyToolRecord(bootstrapTools, (tool) => cloneToolParameters(tool.parameters));
 }
 
 function captureExistingWriteContent(
@@ -189,6 +385,14 @@ function formatExpandHint(theme: RenderTheme): string {
   return theme.fg("muted", " • Ctrl+O to expand");
 }
 
+function formatTruncationHint(remaining: number, expanded: boolean, theme: RenderTheme): string {
+  if (remaining <= 0) {
+    return "";
+  }
+  const hint = expanded ? "" : " • Ctrl+O to expand";
+  return `\n${theme.fg("muted", `... (${remaining} more ${pluralize(remaining, "line")}${hint})`)}`;
+}
+
 function buildPreviewText(
   lines: string[],
   maxLines: number,
@@ -203,10 +407,7 @@ function buildPreviewText(
   let text = shown
     .map((line) => theme.fg("toolOutput", sanitizeAnsiForThemedOutput(line)))
     .join("\n");
-  if (remaining > 0) {
-    const hint = expanded ? "" : " • Ctrl+O to expand";
-    text += `\n${theme.fg("muted", `... (${remaining} more ${pluralize(remaining, "line")}${hint})`)}`;
-  }
+  text += formatTruncationHint(remaining, expanded, theme);
   return text;
 }
 
@@ -261,16 +462,29 @@ function getToolContentArg(value: unknown): string | undefined {
   return getStringField(value, "content");
 }
 
-function getEditLineCount(value: unknown): number {
+function getEditPayloadLineCount(value: unknown): number {
   const record = toRecord(value);
-  const edits = Array.isArray(record.edits) ? record.edits : [];
-  if (edits.length > 0) {
-    return edits.reduce((total, edit) => {
-      return total + countTextLines(getStringField(edit, "newText"));
-    }, 0);
+  const lines = record.lines;
+  if (Array.isArray(lines)) {
+    return lines.filter((line): line is string => typeof line === "string").length;
+  }
+  if (typeof lines === "string") {
+    return countTextLines(lines);
   }
 
   return countTextLines(record.newText);
+}
+
+function getEditLineCount(value: unknown): number {
+  const record = toRecord(value);
+  const edits = Array.isArray(record.edits) ? record.edits as unknown[] : [];
+  if (edits.length > 0) {
+    return edits.reduce<number>((total, edit) => {
+      return total + getEditPayloadLineCount(edit);
+    }, 0);
+  }
+
+  return getEditPayloadLineCount(record);
 }
 
 function isToolError(
@@ -280,7 +494,7 @@ function isToolError(
   return context?.isError === true || toRecord(result).isError === true;
 }
 
-function toStateCarrier(value: unknown): Record<string, unknown> | undefined {
+function toStateRecord(value: unknown): Record<string, unknown> | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return undefined;
   }
@@ -297,7 +511,7 @@ export function recordWriteExecutionMeta(
   pendingMetaByToolCallId.set(toolCallId, meta);
 
   while (pendingMetaByToolCallId.size > WRITE_EXECUTION_META_LIMIT) {
-    const oldestToolCallId = pendingMetaByToolCallId.keys().next().value;
+    const oldestToolCallId: string | undefined = pendingMetaByToolCallId.keys().next().value as string | undefined;
     if (oldestToolCallId === undefined) {
       return;
     }
@@ -319,7 +533,7 @@ export function getWriteExecutionMeta(
     return undefined;
   }
 
-  const carrier = toStateCarrier(context.state);
+  const carrier = toStateRecord(context.state);
   const existing = carrier
     ? toRecord(carrier[WRITE_EXECUTION_META_STATE_KEY])
     : undefined;
@@ -350,7 +564,7 @@ function getPendingDiffPreviewState(
   context: ToolRenderContextLike | undefined,
   stateKey: string,
 ): PendingDiffPreviewState | undefined {
-  const carrier = toStateCarrier(context?.state);
+  const carrier = toStateRecord(context?.state);
   if (!carrier) {
     return undefined;
   }
@@ -392,7 +606,7 @@ function buildPendingDiffCallComponent(
   theme: RenderTheme,
 ): Text | Container {
   if (!context?.isPartial || !previewData) {
-    return new Text(summaryText, 0, 0);
+    return textResult(summaryText);
   }
 
   const container = new Container();
@@ -514,35 +728,78 @@ function formatRtkTechniqueList(techniques: string[]): string {
   return hidden > 0 ? `${visible}, +${hidden} more` : visible;
 }
 
-function formatRtkSummarySuffix(
+function getRtkCompactionInfoIfApplied(
   details: unknown,
   config: ToolDisplayConfig,
-  theme: RenderTheme,
-): string {
+): RtkCompactionInfo | undefined {
   if (!config.showRtkCompactionHints) {
-    return "";
+    return undefined;
   }
-
   const info = getRtkCompactionInfo(details);
-  if (!info?.applied) {
-    return "";
-  }
+  return info?.applied ? info : undefined;
+}
 
-  const segments: string[] = [RTK_COMPACTION_LABEL];
+function withRtkCompactionInfo(
+  params: RtkHintParams,
+  handler: (info: RtkCompactionInfo) => string,
+): string {
+  const info = getRtkCompactionInfoIfApplied(params.details, params.config);
+  return info ? handler(info) : "";
+}
 
-  const techniqueText = formatRtkTechniqueList(info.techniques);
-  if (techniqueText) {
-    segments.push(techniqueText);
-  }
-  if (info.truncated) {
-    segments.push("RTK removed content");
-  }
+interface RtkHintParams {
+  details: unknown;
+  config: ToolDisplayConfig;
+  theme: RenderTheme;
+}
 
-  if (segments.length === 0) {
-    return "";
-  }
+interface PreviewHintContext {
+  lines: string[];
+  config: ToolDisplayConfig;
+  theme: RenderTheme;
+  options: ToolRenderResultOptions;
+  details: unknown;
+}
 
-  return theme.fg("warning", ` • ${segments.join(" • ")}`);
+interface McpPreviewHintContext extends PreviewHintContext {
+  truncation: { truncated: boolean; fullOutputPath?: string };
+}
+
+function handlePartialResult(
+  options: ToolRenderResultOptions,
+  theme: RenderTheme,
+  message: string,
+): Text | undefined {
+  return options.isPartial ? partialResultText(theme, message) : undefined;
+}
+
+function renderSearchPreview(ctx: PreviewHintContext, expandedOnly = false): Text {
+  return renderPreviewText(ctx.lines, ctx.config, ctx.theme, ctx.options, (p) => appendPreviewHints(p, ctx), expandedOnly);
+}
+
+function renderMcpPreview(ctx: McpPreviewHintContext, expandedOnly = false): Text {
+  return renderPreviewText(ctx.lines, ctx.config, ctx.theme, ctx.options, (p) => appendMcpPreviewHints(p, ctx), expandedOnly);
+}
+
+function formatRtkSummarySuffix(params: RtkHintParams): string {
+  const { theme } = params;
+  return withRtkCompactionInfo(params, (info) => {
+    const segments: string[] = [RTK_COMPACTION_LABEL];
+
+    const techniqueText = formatRtkTechniqueList(info.techniques);
+    if (techniqueText) {
+      segments.push(techniqueText);
+    }
+    if (info.truncated) {
+      segments.push("RTK removed content");
+    }
+
+    if (segments.length === 0) {
+      return "";
+    }
+
+    return theme.fg("warning", ` • ${segments.join(" • ")}`);
+  });
 }
 
 function getExpandedPreviewLineLimit(
@@ -569,43 +826,80 @@ function formatExpandedPreviewCapHint(
   return `\n${theme.fg("warning", `(display capped at ${cap} lines by tool-display setting)`)}`;
 }
 
-function formatRtkPreviewHint(
-  details: unknown,
+function formatRtkPreviewHint(params: RtkHintParams): string {
+  const { theme } = params;
+  return withRtkCompactionInfo(params, (info) => {
+    const hints: string[] = [];
+    const techniqueText = formatRtkTechniqueList(info.techniques);
+    if (techniqueText) {
+      hints.push(`${RTK_COMPACTION_LABEL}: ${techniqueText}`);
+    } else {
+      hints.push(`${RTK_COMPACTION_LABEL} applied`);
+    }
+
+    if (
+      info.originalLineCount !== undefined &&
+      info.compactedLineCount !== undefined &&
+      info.originalLineCount > info.compactedLineCount
+    ) {
+      hints.push(`${info.compactedLineCount}/${info.originalLineCount} lines kept`);
+    }
+
+    if (info.truncated) {
+      hints.push("RTK removed content");
+    }
+
+    return hints.length > 0
+      ? `\n${theme.fg("warning", `(${hints.join(" • ")})`)}`
+      : "";
+  });
+}
+
+function appendRtkAndExpandedHints(preview: string, ctx: PreviewHintContext): string {
+  preview += formatRtkPreviewHint(ctx);
+  if (ctx.options.expanded) {
+    preview += formatExpandedPreviewCapHint(ctx.lines, ctx.config, ctx.theme);
+  }
+  return preview;
+}
+
+function appendMcpPreviewHints(preview: string, ctx: McpPreviewHintContext): string {
+  const { config, theme, details, lines, options, truncation } = ctx;
+  if (config.showTruncationHints && (truncation.truncated || truncation.fullOutputPath)) {
+    const hints: string[] = [];
+    if (truncation.truncated) {
+      hints.push("truncated by backend limits");
+    }
+    if (truncation.fullOutputPath) {
+      hints.push(`full output: ${truncation.fullOutputPath}`);
+    }
+    preview += `\n${theme.fg("warning", `(${hints.join(" • ")})`)}`;
+  }
+  return appendRtkAndExpandedHints(preview, ctx);
+}
+
+function appendPreviewHints(preview: string, ctx: PreviewHintContext): string {
+  const { config, theme, details } = ctx;
+  if (config.showTruncationHints && toRecord(toRecord(details).truncation).truncated) {
+    preview += `\n${theme.fg("warning", "(truncated by backend limits)")}`;
+  }
+  return appendRtkAndExpandedHints(preview, ctx);
+}
+
+function renderPreviewText(
+  lines: string[],
   config: ToolDisplayConfig,
   theme: RenderTheme,
-): string {
-  if (!config.showRtkCompactionHints) {
-    return "";
-  }
-
-  const info = getRtkCompactionInfo(details);
-  if (!info?.applied) {
-    return "";
-  }
-
-  const hints: string[] = [];
-  const techniqueText = formatRtkTechniqueList(info.techniques);
-  if (techniqueText) {
-    hints.push(`${RTK_COMPACTION_LABEL}: ${techniqueText}`);
-  } else {
-    hints.push(`${RTK_COMPACTION_LABEL} applied`);
-  }
-
-  if (
-    info.originalLineCount !== undefined &&
-    info.compactedLineCount !== undefined &&
-    info.originalLineCount > info.compactedLineCount
-  ) {
-    hints.push(`${info.compactedLineCount}/${info.originalLineCount} lines kept`);
-  }
-
-  if (info.truncated) {
-    hints.push("RTK removed content");
-  }
-
-  return hints.length > 0
-    ? `\n${theme.fg("warning", `(${hints.join(" • ")})`)}`
-    : "";
+  options: ToolRenderResultOptions,
+  appendHints: (preview: string) => string,
+  expandedOnly: boolean = false,
+): Text {
+  const useExpanded = expandedOnly || options.expanded;
+  const maxLines = useExpanded
+    ? getExpandedPreviewLineLimit(lines, config)
+    : config.previewLines;
+  const preview = buildPreviewText(lines, maxLines, theme, useExpanded);
+  return textResult(appendHints(preview));
 }
 
 function formatReadSummary(
@@ -694,23 +988,27 @@ function getBashPreviewLineLimit(
     : config.previewLines;
 }
 
-function renderBashLivePreview(
-  rawOutput: string,
-  options: ToolRenderResultOptions,
+type ToolRenderInput = {
+  content?: Array<{ type: string; text?: string }>;
+  details?: unknown;
+};
+
+function textResult(text: string): Text {
+  return new Text(text, 0, 0);
+}
+
+function partialResultText(theme: RenderTheme, label: string): Text {
+  return textResult(theme.fg("warning", label));
+}
+
+function renderBashPreviewWithHints(
+  lines: string[],
+  maxLines: number,
   config: ToolDisplayConfig,
   theme: RenderTheme,
+  options: ToolRenderResultOptions,
   details: BashToolDetails | undefined,
 ): Text {
-  const lines = prepareOutputLines(rawOutput, options);
-  if (lines.length === 0) {
-    return new Text("", 0, 0);
-  }
-
-  const maxLines = getBashPreviewLineLimit(lines, options, config);
-  if (!options.expanded && maxLines === 0) {
-    return new Text("", 0, 0);
-  }
-
   let preview = buildPreviewText(lines, maxLines, theme, options.expanded);
   if (config.showTruncationHints) {
     preview += formatBashTruncationHints(details, theme);
@@ -718,7 +1016,37 @@ function renderBashLivePreview(
   if (options.expanded) {
     preview += formatExpandedPreviewCapHint(lines, config, theme);
   }
-  return new Text(preview, 0, 0);
+  return textResult(preview);
+}
+
+function prepareBashLivePreview(
+  rawOutput: string,
+  options: ToolRenderResultOptions,
+  config: ToolDisplayConfig,
+): { lines: string[]; maxLines: number } | undefined {
+  const lines = prepareOutputLines(rawOutput, options);
+  if (lines.length === 0) {
+    return undefined;
+  }
+  const maxLines = getBashPreviewLineLimit(lines, options, config);
+  if (!options.expanded && maxLines === 0) {
+    return undefined;
+  }
+  return { lines, maxLines };
+}
+
+function renderBashLivePreview(
+  rawOutput: string,
+  options: ToolRenderResultOptions,
+  config: ToolDisplayConfig,
+  theme: RenderTheme,
+  details: BashToolDetails | undefined,
+): Text {
+  const prepared = prepareBashLivePreview(rawOutput, options, config);
+  if (!prepared) {
+    return textResult("");
+  }
+  return renderBashPreviewWithHints(prepared.lines, prepared.maxLines, config, theme, options, details);
 }
 
 function renderBashErrorResult(
@@ -738,10 +1066,7 @@ function renderBashErrorResult(
       text += `\n${shown
         .map((line) => theme.fg("error", sanitizeAnsiForThemedOutput(line)))
         .join("\n")}`;
-      if (remaining > 0) {
-        const hint = options.expanded ? "" : " • Ctrl+O to expand";
-        text += `\n${theme.fg("muted", `... (${remaining} more ${pluralize(remaining, "line")}${hint})`)}`;
-      }
+      text += formatTruncationHint(remaining, options.expanded, theme);
     }
   }
 
@@ -752,14 +1077,11 @@ function renderBashErrorResult(
     text += formatExpandedPreviewCapHint(lines, config, theme);
   }
 
-  return new Text(text, 0, 0);
+  return textResult(text);
 }
 
 function renderSearchResult(
-  result: {
-    content: Array<{ type: string; text?: string }>;
-    details?: unknown;
-  },
+  result: ToolRenderInput,
   options: ToolRenderResultOptions,
   config: ToolDisplayConfig,
   theme: RenderTheme,
@@ -768,25 +1090,20 @@ function renderSearchResult(
   pluralLabel?: string,
 ): Text {
   if (options.isPartial) {
-    return new Text(theme.fg("warning", "running..."), 0, 0);
+    return partialResultText(theme, "running...");
   }
 
   const lines = prepareOutputLines(extractTextOutput(result), options);
 
   if (config.searchOutputMode === "hidden") {
-    return new Text("", 0, 0);
+    return textResult("");
   }
+
+  const hintCtx: PreviewHintContext = { lines, config, theme, options, details };
 
   if (config.searchOutputMode === "count") {
     if (options.expanded) {
-      const maxLines = getExpandedPreviewLineLimit(lines, config);
-      let preview = buildPreviewText(lines, maxLines, theme, true);
-      if (config.showTruncationHints && details?.truncation?.truncated) {
-        preview += `\n${theme.fg("warning", "(truncated by backend limits)")}`;
-      }
-      preview += formatRtkPreviewHint(details, config, theme);
-      preview += formatExpandedPreviewCapHint(lines, config, theme);
-      return new Text(preview, 0, 0);
+      return renderSearchPreview(hintCtx, true);
     }
 
     let summary = formatSearchSummary(
@@ -798,22 +1115,11 @@ function renderSearchResult(
       pluralLabel,
     );
     summary += formatExpandHint(theme);
-    summary += formatRtkSummarySuffix(details, config, theme);
-    return new Text(summary, 0, 0);
+    summary += formatRtkSummarySuffix({ details, config, theme });
+    return textResult(summary);
   }
 
-  const maxLines = options.expanded
-    ? getExpandedPreviewLineLimit(lines, config)
-    : config.previewLines;
-  let preview = buildPreviewText(lines, maxLines, theme, options.expanded);
-  if (config.showTruncationHints && details?.truncation?.truncated) {
-    preview += `\n${theme.fg("warning", "(truncated by backend limits)")}`;
-  }
-  preview += formatRtkPreviewHint(details, config, theme);
-  if (options.expanded) {
-    preview += formatExpandedPreviewCapHint(lines, config, theme);
-  }
-  return new Text(preview, 0, 0);
+  return renderSearchPreview(hintCtx);
 }
 
 function resolveMcpProxyCallTarget(args: Record<string, unknown>): string {
@@ -841,6 +1147,12 @@ function resolveMcpProxyCallTarget(args: Record<string, unknown>): string {
   return "status";
 }
 
+function formatArgCountSuffix(argCount: number, theme: RenderTheme): string {
+  return argCount === 0
+    ? theme.fg("muted", " (no args)")
+    : theme.fg("muted", ` (${argCount} ${pluralize(argCount, "arg")})`);
+}
+
 function formatMcpCallLine(
   toolName: string,
   toolLabel: string,
@@ -848,10 +1160,7 @@ function formatMcpCallLine(
   theme: RenderTheme,
 ): Text {
   const argCount = Object.keys(args).length;
-  const argSuffix =
-    argCount === 0
-      ? theme.fg("muted", " (no args)")
-      : theme.fg("muted", ` (${argCount} ${pluralize(argCount, "arg")})`);
+  const argSuffix = formatArgCountSuffix(argCount, theme);
   const target =
     toolName === "mcp"
       ? resolveMcpProxyCallTarget(args)
@@ -887,45 +1196,27 @@ function getMcpTruncationDetails(details: unknown): {
 }
 
 function renderMcpResult(
-  result: {
-    content: Array<{ type: string; text?: string }>;
-    details?: unknown;
-  },
+  result: ToolRenderInput,
   options: ToolRenderResultOptions,
   config: ToolDisplayConfig,
   theme: RenderTheme,
 ): Text {
-  if (options.isPartial) {
-    return new Text(theme.fg("warning", "running..."), 0, 0);
+  const partial = handlePartialResult(options, theme, "running...");
+  if (partial) {
+    return partial;
   }
 
   if (config.mcpOutputMode === "hidden") {
-    return new Text("", 0, 0);
+    return textResult("");
   }
 
   const lines = prepareOutputLines(extractTextOutput(result), options);
   const truncation = getMcpTruncationDetails(result.details);
+  const mcpCtx: McpPreviewHintContext = { lines, config, theme, options, details: result.details, truncation };
 
   if (config.mcpOutputMode === "summary") {
     if (options.expanded) {
-      const maxLines = getExpandedPreviewLineLimit(lines, config);
-      let preview = buildPreviewText(lines, maxLines, theme, true);
-      if (
-        config.showTruncationHints &&
-        (truncation.truncated || truncation.fullOutputPath)
-      ) {
-        const hints: string[] = [];
-        if (truncation.truncated) {
-          hints.push("truncated by backend limits");
-        }
-        if (truncation.fullOutputPath) {
-          hints.push(`full output: ${truncation.fullOutputPath}`);
-        }
-        preview += `\n${theme.fg("warning", `(${hints.join(" • ")})`)}`;
-      }
-      preview += formatRtkPreviewHint(result.details, config, theme);
-      preview += formatExpandedPreviewCapHint(lines, config, theme);
-      return new Text(preview, 0, 0);
+      return renderMcpPreview(mcpCtx, true);
     }
 
     const lineCount = countNonEmptyLines(lines);
@@ -937,152 +1228,452 @@ function renderMcpResult(
     if (config.showTruncationHints && truncation.truncated) {
       summary += theme.fg("warning", " • truncated");
     }
-    summary += formatRtkSummarySuffix(result.details, config, theme);
-    return new Text(summary, 0, 0);
+    summary += formatRtkSummarySuffix({ details: result.details, config, theme });
+    return textResult(summary);
   }
 
-  const maxLines = options.expanded
-    ? getExpandedPreviewLineLimit(lines, config)
-    : config.previewLines;
-  let preview = buildPreviewText(lines, maxLines, theme, options.expanded);
-  if (
-    config.showTruncationHints &&
-    (truncation.truncated || truncation.fullOutputPath)
-  ) {
-    const hints: string[] = [];
-    if (truncation.truncated) {
-      hints.push("truncated by backend limits");
+  return renderMcpPreview(mcpCtx);
+}
+
+function isBuiltInToolName(toolName: string): boolean {
+  return (BUILT_IN_TOOL_OVERRIDE_NAMES as readonly string[]).includes(toolName);
+}
+
+function getRuntimeCustomToolOverride(
+  toolName: string,
+  config: ToolDisplayConfig,
+): CustomToolOverrideConfig | undefined {
+  if (!toolName || isBuiltInToolName(toolName)) {
+    return undefined;
+  }
+
+  const overrides = toRecord((config as unknown as Record<string, unknown>).customToolOverrides);
+  return normalizeCustomToolOverrideEntry(overrides[toolName]);
+}
+
+function formatGenericToolCallLine(
+  toolName: string,
+  args: unknown,
+  theme: RenderTheme,
+): Text {
+  const argRecord = toRecord(args);
+  const argCount = Object.keys(argRecord).length;
+  const argSuffix = formatArgCountSuffix(argCount, theme);
+  return new Text(
+    `${theme.fg("toolTitle", theme.bold(toolName))}${argSuffix}`,
+    0,
+    0,
+  );
+}
+
+function getSearchScope(args: Record<string, unknown>): string {
+  return shortenPath((args.path as string) || ".");
+}
+
+function formatSearchCallLine(
+  toolName: string,
+  accent: string,
+  mutedSuffix: string,
+  theme: RenderTheme,
+): Text {
+  return new Text(
+    `${theme.fg("toolTitle", theme.bold(toolName))} ${theme.fg("accent", accent)}${theme.fg("muted", mutedSuffix)}`,
+    0,
+    0,
+  );
+}
+
+function renderCustomToolResult(
+  result: ToolRenderInput,
+  options: ToolRenderResultOptions,
+  config: ToolDisplayConfig,
+  outputMode: CustomToolOverrideConfig["outputMode"],
+  theme: RenderTheme,
+): Text {
+  return renderMcpResult(
+    result as ToolRenderInput,
+    options,
+    { ...config, mcpOutputMode: outputMode },
+    theme,
+  );
+}
+
+function getAdapterKind(tool: RuntimeToolDefinition, adapter: ToolDisplayAdapter): ToolDisplayKind {
+  if (adapter.kind) {
+    return adapter.kind;
+  }
+  if (tool.name === "read" || tool.name === "edit") {
+    return tool.name;
+  }
+  return isMcpToolCandidate(tool) ? "mcp" : "generic";
+}
+
+function getAdapterPath(args: unknown, adapter: ToolDisplayAdapter): string | undefined {
+  const explicitPath = adapter.getPath?.(args);
+  if (explicitPath) {
+    return explicitPath;
+  }
+
+  for (const field of adapter.pathFields ?? ["file_path", "path"]) {
+    const value = getStringField(args, field);
+    if (value) {
+      return value;
     }
-    if (truncation.fullOutputPath) {
-      hints.push(`full output: ${truncation.fullOutputPath}`);
+  }
+
+  return undefined;
+}
+
+function renderReadDisplayCall(
+  args: unknown,
+  theme: RenderTheme,
+  adapter: ToolDisplayAdapter = {},
+ ): Text {
+  const path = shortenPath(getAdapterPath(args, adapter));
+  const offset = getNumericField(args, "offset");
+  const limit = getNumericField(args, "limit");
+  let suffix = "";
+  if (offset !== undefined || limit !== undefined) {
+    const from = offset ?? 1;
+    const to = limit !== undefined ? from + limit - 1 : undefined;
+    suffix = to ? `:${from}-${to}` : `:${from}`;
+  }
+  const line = `${theme.fg("toolTitle", theme.bold("read"))} ${theme.fg("accent", path || "...")}${theme.fg("warning", suffix)}`;
+  return textResult(line);
+}
+
+function renderReadDisplayResult(
+  result: ToolRenderInput,
+  options: ToolRenderResultOptions,
+  config: ToolDisplayConfig,
+  theme: RenderTheme,
+ ): Text {
+  if (options.isPartial) {
+    return partialResultText(theme, "reading...");
+  }
+
+  if (config.readOutputMode === "hidden") {
+    return textResult("");
+  }
+
+  const details = result.details as ReadToolDetails | undefined;
+  const rawOutput = extractTextOutput(result);
+  const lines = prepareOutputLines(rawOutput, options);
+  const hintCtx: PreviewHintContext = { lines, config, theme, options, details };
+
+  if (config.readOutputMode === "summary") {
+    if (options.expanded) {
+      return renderSearchPreview(hintCtx, true);
     }
-    preview += `\n${theme.fg("warning", `(${hints.join(" • ")})`)}`;
+
+    const summaryLines = compactOutputLines(splitLines(rawOutput), {
+      expanded: true,
+    });
+    let summary = formatReadSummary(
+      summaryLines,
+      details,
+      theme,
+      config.showTruncationHints,
+    );
+    summary += formatExpandHint(theme);
+    summary += formatRtkSummarySuffix({ details: result.details, config, theme });
+    return textResult(summary);
   }
 
-  preview += formatRtkPreviewHint(result.details, config, theme);
-  if (options.expanded) {
-    preview += formatExpandedPreviewCapHint(lines, config, theme);
+  return renderSearchPreview(hintCtx);
+}
+
+function renderEditDisplayCall(
+  args: unknown,
+  theme: RenderTheme,
+  context: ToolRenderContextLike | undefined,
+  adapter: ToolDisplayAdapter = {},
+  getConfig: ConfigGetter,
+ ): Text | Container {
+  const path = shortenPath(getAdapterPath(args, adapter));
+  const lineCount = adapter.getEditLineCount?.(args) ?? getEditLineCount(args);
+  const summaryText = `${theme.fg("toolTitle", theme.bold("edit"))} ${theme.fg("accent", path || "...")}${formatLineCountSuffix(lineCount, theme)}`;
+  if (!context?.argsComplete || !context.isPartial) {
+    return textResult(summaryText);
   }
 
-  return new Text(preview, 0, 0);
+  const previewKey = JSON.stringify({
+    path: getAdapterPath(args, adapter) ?? null,
+    edits: toRecord(args).edits ?? null,
+    oldText: getStringField(args, "oldText") ?? null,
+    newText: getStringField(args, "newText") ?? null,
+  });
+  const previewData = resolvePendingDiffPreview(
+    context,
+    EDIT_PENDING_PREVIEW_STATE_KEY,
+    previewKey,
+    () => buildPendingEditPreviewData(args, context.cwd),
+  );
+  return buildPendingDiffCallComponent(summaryText, previewData, context, getConfig(), theme);
+}
+
+function renderEditDisplayResult(
+  result: ToolRenderInput & { isError?: boolean },
+  options: ToolRenderResultOptions,
+  theme: RenderTheme,
+  context: ToolRenderContextLike | undefined,
+  adapter: ToolDisplayAdapter = {},
+  getConfig: ConfigGetter,
+ ): unknown {
+  const lineCount = adapter.getEditLineCount?.(context?.args) ?? getEditLineCount(context?.args);
+  const { fallbackText, earlyResult } = handleEditOrWriteResult(result, options, context, theme, lineCount, "editing", "Edit failed.");
+  if (earlyResult) {
+    return earlyResult;
+  }
+
+  const config = getConfig();
+  const details = result.details as EditToolDetails | undefined;
+  return renderEditDiffResult(
+    details,
+    { expanded: options.expanded, filePath: getAdapterPath(context?.args, adapter) },
+    config,
+    theme,
+    fallbackText,
+  );
+}
+
+function handleEditOrWriteResult(
+  result: ToolRenderInput,
+  options: ToolRenderResultOptions,
+  context: ToolRenderContextLike | undefined,
+  theme: RenderTheme,
+  lineCount: number,
+  progressLabel: string,
+  errorMessage: string,
+): { fallbackText: string; earlyResult: Text | undefined } {
+  if (options.isPartial) {
+    return { fallbackText: "", earlyResult: new Text(formatInProgressLineCount(progressLabel, lineCount, theme), 0, 0) };
+  }
+  const fallbackText = extractTextOutput(result);
+  if (isToolError(result, context)) {
+    return { fallbackText, earlyResult: textResult(theme.fg("error", fallbackText || errorMessage)) };
+  }
+  return { fallbackText, earlyResult: undefined };
+}
+
+function applyToolDisplayDecorationInPlace(
+  tool: RuntimeToolDefinition,
+  api: ToolDisplayApi,
+  adapter?: ToolDisplayAdapter,
+): boolean {
+  try {
+    captureToolPropertyDescriptors(tool, decoratedToolDescriptors, decoratedTools);
+    Object.assign(tool, api.decorateTool(tool, adapter));
+    return true;
+  } catch (error) {
+    logToolDisplayDebug("Tool display decoration failed.", error);
+    return false;
+  }
+}
+
+function drainPendingToolDisplayDecorations(api: ToolDisplayApi): void {
+  const globalWithApi = globalThis as GlobalWithToolDisplayApi;
+  const pendingDecorations = globalWithApi[TOOL_DISPLAY_PENDING_DECORATIONS_KEY];
+  if (!Array.isArray(pendingDecorations) || pendingDecorations.length === 0) {
+    return;
+  }
+
+  const entries = pendingDecorations.splice(0);
+  for (const entry of entries) {
+    if (!entry?.tool || typeof entry.tool !== "object") {
+      continue;
+    }
+
+    applyToolDisplayDecorationInPlace(entry.tool, api, entry.adapter);
+  }
+}
+
+function installToolDisplayApi(getConfig: ConfigGetter): ToolDisplayApi {
+  const adapters = new Map<string, ToolDisplayAdapter>();
+  let nextAdapterId = 0;
+
+  const resolveAdapter = (tool: RuntimeToolDefinition, adapter?: ToolDisplayAdapter): ToolDisplayAdapter => {
+    if (adapter) {
+      return adapter;
+    }
+    const toolName = getTextField(tool, "name");
+    if (toolName) {
+      return adapters.get(toolName) ?? {};
+    }
+    return {};
+  };
+
+  const api: ToolDisplayApi = {
+    version: 1,
+    decorateTool<T extends RuntimeToolDefinition>(tool: T, adapter?: ToolDisplayAdapter): T {
+      const resolvedAdapter = resolveAdapter(tool, adapter);
+      const kind = getAdapterKind(tool, resolvedAdapter);
+      const overrideExisting = resolvedAdapter.overrideExistingRenderers === true;
+      const decorated: RuntimeToolDefinition = { ...tool };
+
+      if (resolvedAdapter.renderCall && (overrideExisting || typeof decorated.renderCall !== "function")) {
+        decorated.renderCall = resolvedAdapter.renderCall;
+      } else if (kind === "read" && (overrideExisting || typeof decorated.renderCall !== "function")) {
+        decorated.renderCall = (args: unknown, theme: RenderTheme) => renderReadDisplayCall(args, theme, resolvedAdapter);
+      } else if (kind === "edit" && (overrideExisting || typeof decorated.renderCall !== "function")) {
+        decorated.renderCall = (args: unknown, theme: RenderTheme, context: ToolRenderContextLike) => renderEditDisplayCall(args, theme, context, resolvedAdapter, getConfig);
+      } else if (kind === "mcp" && (overrideExisting || typeof decorated.renderCall !== "function")) {
+        decorated.renderCall = (args: unknown, theme: RenderTheme) => {
+          const toolName = getTextField(decorated, "name") ?? "mcp";
+          const toolLabel = getTextField(decorated, "label") ?? (toolName === "mcp" ? "MCP Proxy" : `MCP ${toolName}`);
+          return formatMcpCallLine(toolName, toolLabel, toRecord(args), theme);
+        };
+      }
+
+      if (resolvedAdapter.renderResult && (overrideExisting || typeof decorated.renderResult !== "function")) {
+        decorated.renderResult = resolvedAdapter.renderResult;
+      } else if (kind === "read" && (overrideExisting || typeof decorated.renderResult !== "function")) {
+        decorated.renderResult = (result: ToolRenderInput, options: ToolRenderResultOptions, theme: RenderTheme) =>
+          renderReadDisplayResult(result, options, getConfig(), theme);
+      } else if (kind === "edit" && (overrideExisting || typeof decorated.renderResult !== "function")) {
+        decorated.renderResult = (result: ToolRenderInput & { isError?: boolean }, options: ToolRenderResultOptions, theme: RenderTheme, context?: ToolRenderContextLike) =>
+          renderEditDisplayResult(result, options, theme, context, resolvedAdapter, getConfig);
+      } else if (kind === "mcp" && (overrideExisting || typeof decorated.renderResult !== "function")) {
+        decorated.renderResult = (result: ToolRenderInput, options: ToolRenderResultOptions, theme: RenderTheme) =>
+          renderMcpResult(result, options, getConfig(), theme);
+      }
+
+      if (kind === "edit" && (overrideExisting || typeof decorated.renderShell !== "string")) {
+        decorated.renderShell = "default";
+      }
+
+      return decorated as T;
+    },
+    registerAdapter(adapter: ToolDisplayAdapter): string {
+      const id = adapter.id || adapter.toolName || `adapter-${++nextAdapterId}`;
+      adapters.set(id, { ...adapter, id });
+      if (adapter.toolName) {
+        adapters.set(adapter.toolName, { ...adapter, id });
+      }
+      return id;
+    },
+    unregisterAdapter(id: string): boolean {
+      const adapter = adapters.get(id);
+      const removed = adapters.delete(id);
+      if (adapter?.toolName) {
+        adapters.delete(adapter.toolName);
+      }
+      return removed;
+    },
+  };
+
+  (globalThis as GlobalWithToolDisplayApi)[TOOL_DISPLAY_API_KEY] = api;
+  drainPendingToolDisplayDecorations(api);
+  return api;
+}
+
+function tryGetAllTools(pi: ExtensionAPI, debugMessage: string): unknown[] | undefined {
+  try {
+    return pi.getAllTools();
+  } catch (error) {
+    logToolDisplayDebug(debugMessage, error);
+    return undefined;
+  }
 }
 
 export function registerToolDisplayOverrides(
   pi: ExtensionAPI,
   getConfig: ConfigGetter,
 ): void {
+  clearBuiltInToolCache();
+  const toolDisplayApi = installToolDisplayApi(getConfig);
+  registerCleanup(() => {
+    restoreToolPropertyDescriptors(decoratedToolDescriptors, decoratedTools);
+    const globalWithApi = globalThis as GlobalWithToolDisplayApi;
+    if (globalWithApi[TOOL_DISPLAY_API_KEY] === toolDisplayApi) {
+      delete globalWithApi[TOOL_DISPLAY_API_KEY];
+    }
+  });
   const bootstrapTools = getBuiltInTools(process.cwd());
-  const builtInPromptMetadata = {
-    read: extractPromptMetadata(bootstrapTools.read),
-    grep: extractPromptMetadata(bootstrapTools.grep),
-    find: extractPromptMetadata(bootstrapTools.find),
-    ls: extractPromptMetadata(bootstrapTools.ls),
-    bash: extractPromptMetadata(bootstrapTools.bash),
-    edit: extractPromptMetadata(bootstrapTools.edit),
-    write: extractPromptMetadata(bootstrapTools.write),
-  };
-  const clonedParameters = {
-    read: cloneToolParameters(bootstrapTools.read.parameters),
-    grep: cloneToolParameters(bootstrapTools.grep.parameters),
-    find: cloneToolParameters(bootstrapTools.find.parameters),
-    ls: cloneToolParameters(bootstrapTools.ls.parameters),
-    bash: cloneToolParameters(bootstrapTools.bash.parameters),
-    edit: cloneToolParameters(bootstrapTools.edit.parameters),
-    write: cloneToolParameters(bootstrapTools.write.parameters),
-  };
+  const builtInPromptMetadata = createLazyPromptMetadata(bootstrapTools);
+  const clonedParameters = createLazyClonedParameters(bootstrapTools);
   const writeExecutionMetaByToolCallId = new Map<string, WriteExecutionMeta>();
+  const registeredBuiltInToolOverrides = new Set<BuiltInToolOverrideName>();
+
+  const isExternallyOwnedBuiltInTool = (toolName: BuiltInToolOverrideName): boolean => {
+    const allTools = tryGetAllTools(pi, "Built-in tool override ownership discovery unavailable during extension load; registering renderer for pre-bind history rendering.");
+    if (!allTools) {
+      return false;
+    }
+
+    const currentOwner = allTools.find((tool) => getTextField(tool, "name") === toolName);
+    const sourceInfo = toRecord(toRecord(currentOwner).sourceInfo);
+    const source = getTextField(sourceInfo, "source");
+    if (currentOwner && source && source !== "builtin") {
+      logToolDisplayDebug("Skipped built-in tool display override because another tool owner is active.", {
+        toolName,
+        source,
+        path: getTextField(sourceInfo, "path") ?? "unknown",
+      });
+      return true;
+    }
+
+    return false;
+  };
 
   const registerIfOwned = (
     toolName: BuiltInToolOverrideName,
     register: () => void,
   ): void => {
-    if (getConfig().registerToolOverrides[toolName]) {
-      register();
+    if (
+      registeredBuiltInToolOverrides.has(toolName) ||
+      !getConfig().registerToolOverrides[toolName] ||
+      isExternallyOwnedBuiltInTool(toolName)
+    ) {
+      return;
     }
+
+    register();
+    registeredBuiltInToolOverrides.add(toolName);
+  };
+
+  function createBuiltinToolBase(toolName: keyof BuiltInTools) {
+    return {
+      description: bootstrapTools[toolName].description,
+      ...builtInPromptMetadata[toolName],
+      parameters: clonedParameters[toolName],
+      prepareArguments: getToolPrepareArguments(bootstrapTools[toolName]),
+      async execute(toolCallId: string, params: Record<string, unknown>, signal: unknown, onUpdate: unknown, ctx: { cwd: string }) {
+        return getBuiltInTools(ctx.cwd)[toolName].execute(
+          toolCallId,
+          params as never,
+          signal as never,
+          onUpdate as never,
+        );
+      },
+    };
+  }
+
+  const renderSearchToolResult = (
+    result: ToolRenderInput,
+    options: ToolRenderResultOptions,
+    theme: RenderTheme,
+    unitLabel: string,
+    pluralLabel?: string,
+  ): Text => {
+    const config = getConfig();
+    return renderSearchResult(result as never, options, config, theme, unitLabel, result.details, pluralLabel);
+  };
+
+  const buildSearchCallSuffix = (args: Record<string, unknown>): { scope: string; limitSuffix: string } => {
+    return { scope: getSearchScope(args), limitSuffix: args.limit !== undefined ? ` (limit ${args.limit})` : "" };
   };
 
   registerIfOwned("read", () => {
     registerRuntimeTool(pi, {
       name: "read",
       label: "read",
-      description: bootstrapTools.read.description,
-      ...builtInPromptMetadata.read,
-      parameters: clonedParameters.read,
-      prepareArguments: getToolPrepareArguments(bootstrapTools.read),
-      async execute(toolCallId, params, signal, onUpdate, ctx) {
-        return getBuiltInTools(ctx.cwd).read.execute(
-          toolCallId,
-          params,
-          signal,
-          onUpdate,
-        );
-      },
+      ...createBuiltinToolBase("read"),
       renderCall(args, theme) {
-        const path = shortenPath(getToolPathArg(args));
-        const offset = getNumericField(args, "offset");
-        const limit = getNumericField(args, "limit");
-        let suffix = "";
-        if (offset !== undefined || limit !== undefined) {
-          const from = offset ?? 1;
-          const to =
-            limit !== undefined ? from + limit - 1 : undefined;
-          suffix = to ? `:${from}-${to}` : `:${from}`;
-        }
-        const line = `${theme.fg("toolTitle", theme.bold("read"))} ${theme.fg("accent", path || "...")}${theme.fg("warning", suffix)}`;
-        return new Text(line, 0, 0);
+        return renderReadDisplayCall(args, theme);
       },
       renderResult(result, options, theme) {
-        if (options.isPartial) {
-          return new Text(theme.fg("warning", "reading..."), 0, 0);
-        }
-
-        const config = getConfig();
-        if (config.readOutputMode === "hidden") {
-          return new Text("", 0, 0);
-        }
-
-        const details = result.details as ReadToolDetails | undefined;
-        const rawOutput = extractTextOutput(result);
-        const lines = prepareOutputLines(rawOutput, options);
-
-        if (config.readOutputMode === "summary") {
-          if (options.expanded) {
-            const maxLines = getExpandedPreviewLineLimit(lines, config);
-            let preview = buildPreviewText(lines, maxLines, theme, true);
-            if (config.showTruncationHints && details?.truncation?.truncated) {
-              preview += `\n${theme.fg("warning", "(truncated by backend limits)")}`;
-            }
-            preview += formatRtkPreviewHint(result.details, config, theme);
-            preview += formatExpandedPreviewCapHint(lines, config, theme);
-            return new Text(preview, 0, 0);
-          }
-
-          const summaryLines = compactOutputLines(splitLines(rawOutput), {
-            expanded: true,
-          });
-          let summary = formatReadSummary(
-            summaryLines,
-            details,
-            theme,
-            config.showTruncationHints,
-          );
-          summary += formatExpandHint(theme);
-          summary += formatRtkSummarySuffix(result.details, config, theme);
-          return new Text(summary, 0, 0);
-        }
-
-        const maxLines = options.expanded
-          ? getExpandedPreviewLineLimit(lines, config)
-          : config.previewLines;
-        let preview = buildPreviewText(lines, maxLines, theme, options.expanded);
-        if (config.showTruncationHints && details?.truncation?.truncated) {
-          preview += `\n${theme.fg("warning", "(truncated by backend limits)")}`;
-        }
-        preview += formatRtkPreviewHint(result.details, config, theme);
-        if (options.expanded) {
-          preview += formatExpandedPreviewCapHint(lines, config, theme);
-        }
-        return new Text(preview, 0, 0);
+        return renderReadDisplayResult(result, options, getConfig(), theme);
       },
     });
   });
@@ -1091,38 +1682,16 @@ export function registerToolDisplayOverrides(
     registerRuntimeTool(pi, {
       name: "grep",
     label: "grep",
-    description: bootstrapTools.grep.description,
-    ...builtInPromptMetadata.grep,
-    parameters: clonedParameters.grep,
-    prepareArguments: getToolPrepareArguments(bootstrapTools.grep),
-    async execute(toolCallId, params, signal, onUpdate, ctx) {
-      return getBuiltInTools(ctx.cwd).grep.execute(
-        toolCallId,
-        params,
-        signal,
-        onUpdate,
-      );
-    },
+    ...createBuiltinToolBase("grep"),
     renderCall(args, theme) {
-      const scope = shortenPath(args.path || ".");
+      const scope = getSearchScope(args);
       const globSuffix = args.glob ? ` (${args.glob})` : "";
       const limitSuffix =
         args.limit !== undefined ? ` limit ${args.limit}` : "";
-      const line = `${theme.fg("toolTitle", theme.bold("grep"))} ${theme.fg("accent", `/${args.pattern}/`)}${theme.fg("muted", ` in ${scope}${globSuffix}${limitSuffix}`)}`;
-      return new Text(line, 0, 0);
+      return formatSearchCallLine("grep", `/${args.pattern}/`, ` in ${scope}${globSuffix}${limitSuffix}`, theme);
     },
     renderResult(result, options, theme) {
-      const config = getConfig();
-      const details = result.details as GrepToolDetails | undefined;
-      return renderSearchResult(
-        result,
-        options,
-        config,
-        theme,
-        "match",
-        details,
-        "matches",
-      );
+      return renderSearchToolResult(result, options, theme, "match", "matches");
     },
     });
   });
@@ -1131,36 +1700,13 @@ export function registerToolDisplayOverrides(
     registerRuntimeTool(pi, {
       name: "find",
     label: "find",
-    description: bootstrapTools.find.description,
-    ...builtInPromptMetadata.find,
-    parameters: clonedParameters.find,
-    prepareArguments: getToolPrepareArguments(bootstrapTools.find),
-    async execute(toolCallId, params, signal, onUpdate, ctx) {
-      return getBuiltInTools(ctx.cwd).find.execute(
-        toolCallId,
-        params,
-        signal,
-        onUpdate,
-      );
-    },
+    ...createBuiltinToolBase("find"),
     renderCall(args, theme) {
-      const scope = shortenPath(args.path || ".");
-      const limitSuffix =
-        args.limit !== undefined ? ` (limit ${args.limit})` : "";
-      const line = `${theme.fg("toolTitle", theme.bold("find"))} ${theme.fg("accent", args.pattern)}${theme.fg("muted", ` in ${scope}${limitSuffix}`)}`;
-      return new Text(line, 0, 0);
+      const { scope, limitSuffix } = buildSearchCallSuffix(args);
+      return formatSearchCallLine("find", args.pattern as string, ` in ${scope}${limitSuffix}`, theme);
     },
     renderResult(result, options, theme) {
-      const config = getConfig();
-      const details = result.details as FindToolDetails | undefined;
-      return renderSearchResult(
-        result,
-        options,
-        config,
-        theme,
-        "result",
-        details,
-      );
+      return renderSearchToolResult(result, options, theme, "result");
     },
     });
   });
@@ -1169,37 +1715,13 @@ export function registerToolDisplayOverrides(
     registerRuntimeTool(pi, {
       name: "ls",
     label: "ls",
-    description: bootstrapTools.ls.description,
-    ...builtInPromptMetadata.ls,
-    parameters: clonedParameters.ls,
-    prepareArguments: getToolPrepareArguments(bootstrapTools.ls),
-    async execute(toolCallId, params, signal, onUpdate, ctx) {
-      return getBuiltInTools(ctx.cwd).ls.execute(
-        toolCallId,
-        params,
-        signal,
-        onUpdate,
-      );
-    },
+    ...createBuiltinToolBase("ls"),
     renderCall(args, theme) {
-      const scope = shortenPath(args.path || ".");
-      const limitSuffix =
-        args.limit !== undefined ? ` (limit ${args.limit})` : "";
-      const line = `${theme.fg("toolTitle", theme.bold("ls"))} ${theme.fg("accent", scope)}${theme.fg("muted", limitSuffix)}`;
-      return new Text(line, 0, 0);
+      const { scope, limitSuffix } = buildSearchCallSuffix(args);
+      return formatSearchCallLine("ls", scope, limitSuffix, theme);
     },
     renderResult(result, options, theme) {
-      const config = getConfig();
-      const details = result.details as LsToolDetails | undefined;
-      return renderSearchResult(
-        result,
-        options,
-        config,
-        theme,
-        "entry",
-        details,
-        "entries",
-      );
+      return renderSearchToolResult(result, options, theme, "entry", "entries");
     },
     });
   });
@@ -1216,53 +1738,16 @@ export function registerToolDisplayOverrides(
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       return getBuiltInTools(ctx.cwd).edit.execute(
         toolCallId,
-        params,
+        params as never,
         signal,
-        onUpdate,
+        onUpdate as never,
       );
     },
     renderCall(args, theme, context) {
-      const path = shortenPath(getToolPathArg(args));
-      const lineCount = getEditLineCount(args);
-      const summaryText = `${theme.fg("toolTitle", theme.bold("edit"))} ${theme.fg("accent", path || "...")}${formatLineCountSuffix(lineCount, theme)}`;
-      if (!context.argsComplete || !context.isPartial) {
-        return new Text(summaryText, 0, 0);
-      }
-
-      const previewKey = JSON.stringify({ path: getToolPathArg(args) ?? null, edits: toRecord(args).edits ?? null, oldText: getStringField(args, "oldText") ?? null, newText: getStringField(args, "newText") ?? null });
-      const previewData = resolvePendingDiffPreview(
-        context,
-        EDIT_PENDING_PREVIEW_STATE_KEY,
-        previewKey,
-        () => buildPendingEditPreviewData(args, context.cwd),
-      );
-      return buildPendingDiffCallComponent(summaryText, previewData, context, getConfig(), theme);
+      return renderEditDisplayCall(args, theme, context, {}, getConfig);
     },
     renderResult(result, options, theme, context) {
-      const lineCount = getEditLineCount(context?.args);
-      if (options.isPartial) {
-        return new Text(
-          formatInProgressLineCount("editing", lineCount, theme),
-          0,
-          0,
-        );
-      }
-
-      const fallbackText = extractTextOutput(result);
-      if (isToolError(result, context)) {
-        const error = fallbackText || "Edit failed.";
-        return new Text(theme.fg("error", error), 0, 0);
-      }
-
-      const config = getConfig();
-      const details = result.details as EditToolDetails | undefined;
-      return renderEditDiffResult(
-        details,
-        { expanded: options.expanded, filePath: getToolPathArg(context?.args) },
-        config,
-        theme,
-        fallbackText,
-      );
+      return renderEditDisplayResult(result as never, options, theme, context, {}, getConfig);
     },
     });
   });
@@ -1284,9 +1769,9 @@ export function registerToolDisplayOverrides(
 
       return getBuiltInTools(ctx.cwd).write.execute(
         toolCallId,
-        params,
+        params as never,
         signal,
-        onUpdate,
+        onUpdate as never,
       );
     },
     renderCall(args, theme, context) {
@@ -1302,7 +1787,7 @@ export function registerToolDisplayOverrides(
         : "";
       const summaryText = `${theme.fg("toolTitle", theme.bold("write"))} ${theme.fg("accent", path || "...")}${suffix}`;
       if (!context.argsComplete || !context.isPartial) {
-        return new Text(summaryText, 0, 0);
+        return textResult(summaryText);
       }
 
       const previewKey = JSON.stringify({ path: getToolPathArg(args) ?? null, content: content ?? null });
@@ -1317,18 +1802,9 @@ export function registerToolDisplayOverrides(
     renderResult(result, options, theme, context) {
       const content = getToolContentArg(context?.args);
       const lineCount = countWriteContentLines(content);
-      if (options.isPartial) {
-        return new Text(
-          formatInProgressLineCount("writing", lineCount, theme),
-          0,
-          0,
-        );
-      }
-
-      const fallbackText = extractTextOutput(result);
-      if (isToolError(result, context)) {
-        const error = fallbackText || "Write failed.";
-        return new Text(theme.fg("error", error), 0, 0);
+      const { fallbackText, earlyResult } = handleEditOrWriteResult(result, options, context, theme, lineCount, "writing", "Write failed.");
+      if (earlyResult) {
+        return earlyResult;
       }
 
       const config = getConfig();
@@ -1356,20 +1832,9 @@ export function registerToolDisplayOverrides(
     registerRuntimeTool(pi, {
       name: "bash",
     label: "bash",
-    description: bootstrapTools.bash.description,
-    ...builtInPromptMetadata.bash,
-    parameters: clonedParameters.bash,
-    prepareArguments: getToolPrepareArguments(bootstrapTools.bash),
-    async execute(toolCallId, params, signal, onUpdate, ctx) {
-      return getBuiltInTools(ctx.cwd).bash.execute(
-        toolCallId,
-        params,
-        signal,
-        onUpdate,
-      );
-    },
+    ...createBuiltinToolBase("bash"),
     renderCall(args, theme, context) {
-      return renderBashCall(args, theme, context);
+      return renderBashCall(args, theme, context as never);
     },
     renderResult(result, options, theme, context) {
       const config = getConfig();
@@ -1391,18 +1856,13 @@ export function registerToolDisplayOverrides(
         if (config.showTruncationHints) {
           text += formatBashTruncationHints(details, theme);
         }
-        return new Text(text, 0, 0);
+        return textResult(text);
       }
 
       if (config.bashOutputMode === "summary") {
         if (options.expanded) {
           const maxLines = getExpandedPreviewLineLimit(lines, config);
-          let preview = buildPreviewText(lines, maxLines, theme, true);
-          if (config.showTruncationHints) {
-            preview += formatBashTruncationHints(details, theme);
-          }
-          preview += formatExpandedPreviewCapHint(lines, config, theme);
-          return new Text(preview, 0, 0);
+          return renderBashPreviewWithHints(lines, maxLines, config, theme, options, details);
         }
 
         let summary = formatBashSummary(
@@ -1415,21 +1875,14 @@ export function registerToolDisplayOverrides(
         if (config.showTruncationHints) {
           summary += formatBashTruncationHints(details, theme);
         }
-        return new Text(summary, 0, 0);
+        return textResult(summary);
       }
 
       if (config.bashOutputMode === "preview") {
         const maxLines = options.expanded
           ? getExpandedPreviewLineLimit(lines, config)
           : config.previewLines;
-        let preview = buildPreviewText(lines, maxLines, theme, options.expanded);
-        if (config.showTruncationHints) {
-          preview += formatBashTruncationHints(details, theme);
-        }
-        if (options.expanded) {
-          preview += formatExpandedPreviewCapHint(lines, config, theme);
-        }
-        return new Text(preview, 0, 0);
+        return renderBashPreviewWithHints(lines, maxLines, config, theme, options, details);
       }
 
       if (!options.expanded && config.bashCollapsedLines === 0) {
@@ -1437,7 +1890,7 @@ export function registerToolDisplayOverrides(
         if (config.showTruncationHints) {
           hidden += formatBashTruncationHints(details, theme);
         }
-        return new Text(hidden, 0, 0);
+        return textResult(hidden);
       }
 
       const maxLines = options.expanded
@@ -1447,93 +1900,222 @@ export function registerToolDisplayOverrides(
       if (config.showTruncationHints) {
         text += formatBashTruncationHints(details, theme);
       }
-      return new Text(text, 0, 0);
+      return textResult(text);
     },
     });
   });
 
-  const wrappedMcpToolNames = new Set<string>();
+  const wrappedCustomToolNames = new Set<string>();
+  registerCleanup(() => wrappedCustomToolNames.clear());
 
-  const registerMcpToolOverrides = (): void => {
-    let allTools: unknown[] = [];
-    try {
-      allTools = pi.getAllTools();
-    } catch (error) {
-      logToolDisplayDebug("MCP tool override discovery failed.", error);
+  const getCustomOverrideForCandidate = (candidate: unknown): {
+    toolName: string;
+    override: CustomToolOverrideConfig;
+  } | undefined => {
+    const toolName = getTextField(candidate, "name");
+    if (!toolName) {
+      return undefined;
+    }
+
+    const override = getRuntimeCustomToolOverride(toolName, getConfig());
+    if (!override?.enabled) {
+      return undefined;
+    }
+
+    return { toolName, override };
+  };
+
+  const decorateCustomToolOverrideCandidate = (candidate: unknown): boolean => {
+    const customOverride = getCustomOverrideForCandidate(candidate);
+    if (!customOverride || wrappedCustomToolNames.has(customOverride.toolName)) {
+      return customOverride !== undefined;
+    }
+
+    const { toolName, override } = customOverride;
+    const runtimeTool = candidate as RuntimeToolDefinition;
+    applyToolDisplayDecorationInPlace(
+      runtimeTool,
+      toolDisplayApi,
+      {
+        kind: override.kind,
+        overrideExistingRenderers: true,
+        renderCall(args, theme) {
+          if (override.kind === "mcp") {
+            return formatMcpCallLine("mcp", "MCP Proxy", toRecord(args), theme);
+          }
+          return formatGenericToolCallLine(toolName, args, theme);
+        },
+        renderResult(result, options, theme) {
+          return renderCustomToolResult(
+            result as ToolRenderInput,
+            options,
+            getConfig(),
+            override.outputMode,
+            theme,
+          );
+        },
+      },
+    );
+
+    wrappedCustomToolNames.add(toolName);
+    return true;
+  };
+
+  const wrappedMcpToolNames = new Set<string>();
+  registerCleanup(() => wrappedMcpToolNames.clear());
+
+  const decorateMcpToolCandidate = (candidate: unknown): void => {
+    if (getCustomOverrideForCandidate(candidate)) {
       return;
     }
 
-    for (const candidate of allTools) {
-      if (!isMcpToolCandidate(candidate)) {
-        continue;
-      }
+    if (!isMcpToolCandidate(candidate)) {
+      return;
+    }
 
-      const toolName = getTextField(candidate, "name");
-      if (!toolName || wrappedMcpToolNames.has(toolName)) {
-        continue;
-      }
+    const toolName = getTextField(candidate, "name");
+    if (!toolName || wrappedMcpToolNames.has(toolName)) {
+      return;
+    }
 
-      const toolRecord = toRecord(candidate);
-      const executeCandidate = toolRecord.execute;
-      if (typeof executeCandidate !== "function") {
-        continue;
-      }
+    const toolRecord = toRecord(candidate);
+    const prepareArgumentsDelegate =
+      typeof toolRecord.prepareArguments === "function"
+        ? (toolRecord.prepareArguments as (args: unknown) => unknown)
+        : undefined;
+    const toolLabel =
+      getTextField(candidate, "label") ||
+      (toolName === "mcp" ? "MCP Proxy" : `MCP ${toolName}`);
+    const toolDescription =
+      getTextField(candidate, "description") || "MCP tool";
+    const parameters = toRecord(toolRecord.parameters);
 
-      const executeDelegate = executeCandidate as (...args: unknown[]) => unknown;
-      const prepareArgumentsDelegate =
-        typeof toolRecord.prepareArguments === "function"
-          ? (toolRecord.prepareArguments as (args: unknown) => unknown)
-          : undefined;
-      const toolLabel =
-        getTextField(candidate, "label") ||
-        (toolName === "mcp" ? "MCP Proxy" : `MCP ${toolName}`);
-      const toolDescription =
-        getTextField(candidate, "description") || "MCP tool";
-      const parameters = toRecord(toolRecord.parameters);
+    const promptMetadata =
+      toolName === "mcp"
+        ? {
+            promptSnippet: MCP_PROXY_PROMPT_SNIPPET,
+            promptGuidelines: [...MCP_PROXY_PROMPT_GUIDELINES],
+          }
+        : {
+            promptSnippet: buildPromptSnippetFromDescription(
+              toolDescription,
+              `Call MCP tool '${toolName}'.`,
+            ),
+          };
 
-      const promptMetadata =
-        toolName === "mcp"
-          ? {
-              promptSnippet: MCP_PROXY_PROMPT_SNIPPET,
-              promptGuidelines: [...MCP_PROXY_PROMPT_GUIDELINES],
-            }
-          : {
-              promptSnippet: buildPromptSnippetFromDescription(
-                toolDescription,
-                `Call MCP tool '${toolName}'.`,
-              ),
-            };
-
-      registerRuntimeTool(pi, {
-        name: toolName,
-        label: toolLabel,
-        description: toolDescription,
-        ...promptMetadata,
-        parameters,
-        prepareArguments: prepareArgumentsDelegate,
-        async execute(toolCallId, params, signal, onUpdate, ctx) {
-          return await Promise.resolve(
-            executeDelegate(toolCallId, params, signal, onUpdate, ctx),
-          );
-        },
+    const runtimeTool = candidate as RuntimeToolDefinition;
+    applyToolDisplayDecorationInPlace(
+      runtimeTool,
+      toolDisplayApi,
+      {
+        kind: "mcp",
+        overrideExistingRenderers: true,
         renderCall(args, theme) {
           return formatMcpCallLine(toolName, toolLabel, toRecord(args), theme);
         },
         renderResult(result, options, theme) {
-          return renderMcpResult(result, options, getConfig(), theme);
+          return renderMcpResult(
+            result as ToolRenderInput,
+            options,
+            getConfig(),
+            theme,
+          );
         },
-      });
+      },
+    );
+    Object.assign(runtimeTool, {
+      label: toolLabel,
+      description: toolDescription,
+      ...promptMetadata,
+      parameters,
+      prepareArguments: prepareArgumentsDelegate,
+    });
 
-      wrappedMcpToolNames.add(toolName);
+    wrappedMcpToolNames.add(toolName);
+  };
+
+  const installMcpRegistrationInterceptor = (): void => {
+    const piWithInterception = pi as PiWithRegisterToolInterception;
+    const existingInterception = piWithInterception[TOOL_DISPLAY_REGISTER_TOOL_INTERCEPTOR_KEY];
+    if (existingInterception && pi.registerTool === existingInterception.wrapped) {
+      pi.registerTool = existingInterception.original;
+      delete piWithInterception[TOOL_DISPLAY_REGISTER_TOOL_INTERCEPTOR_KEY];
+    }
+
+    const originalRegisterTool = pi.registerTool;
+    const wrappedRegisterTool = function registerToolWithMcpDecoration(
+      this: ExtensionAPI,
+      tool: ToolDefinition,
+    ): void {
+      originalRegisterTool.call(this, tool);
+      try {
+        if (!decorateCustomToolOverrideCandidate(tool)) {
+          decorateMcpToolCandidate(tool);
+        }
+      } catch (error) {
+        logToolDisplayDebug("Tool display registration decoration failed.", error);
+      }
+    } as ExtensionAPI["registerTool"];
+
+    pi.registerTool = wrappedRegisterTool;
+    piWithInterception[TOOL_DISPLAY_REGISTER_TOOL_INTERCEPTOR_KEY] = {
+      original: originalRegisterTool,
+      wrapped: wrappedRegisterTool,
+    };
+
+    registerCleanup(() => {
+      if (pi.registerTool === wrappedRegisterTool) {
+        pi.registerTool = originalRegisterTool;
+      }
+      const currentInterception = piWithInterception[TOOL_DISPLAY_REGISTER_TOOL_INTERCEPTOR_KEY];
+      if (currentInterception?.wrapped === wrappedRegisterTool) {
+        delete piWithInterception[TOOL_DISPLAY_REGISTER_TOOL_INTERCEPTOR_KEY];
+      }
+    });
+  };
+
+  installMcpRegistrationInterceptor();
+
+  const registerMcpToolOverrides = (): void => {
+    const allTools = tryGetAllTools(pi, "MCP tool override discovery failed.");
+    if (!allTools) {
+      return;
+    }
+
+    for (const candidate of allTools) {
+      if (!decorateCustomToolOverrideCandidate(candidate)) {
+        decorateMcpToolCandidate(candidate);
+      }
+    }
+  };
+
+  const mcpDiscoveryRetryTimers = new Set<ReturnType<typeof setTimeout> & { unref?: () => void }>();
+  registerCleanup(() => {
+    for (const timer of mcpDiscoveryRetryTimers) {
+      clearTimeout(timer);
+    }
+    mcpDiscoveryRetryTimers.clear();
+  });
+
+  const scheduleMcpToolOverrideDiscovery = (): void => {
+    for (const delayMs of [25, 75, 150, 300]) {
+      const timer = setTimeout(() => {
+        mcpDiscoveryRetryTimers.delete(timer);
+        registerMcpToolOverrides();
+      }, delayMs) as ReturnType<typeof setTimeout> & { unref?: () => void };
+      mcpDiscoveryRetryTimers.add(timer);
+      timer.unref?.();
     }
   };
 
   pi.on("session_start", async () => {
     clearWriteExecutionMeta(writeExecutionMetaByToolCallId);
     registerMcpToolOverrides();
+    scheduleMcpToolOverrideDiscovery();
   });
   pi.on("before_agent_start", async () => {
     clearWriteExecutionMeta(writeExecutionMetaByToolCallId);
     registerMcpToolOverrides();
+    scheduleMcpToolOverrideDiscovery();
   });
 }

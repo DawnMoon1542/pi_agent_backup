@@ -1,11 +1,15 @@
 import { Text } from "@earendil-works/pi-tui";
+import { registerCleanup, registerTimer } from "./disposable.js";
 
 const BASH_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
-const BASH_SPINNER_INTERVAL_MS = 80;
+const BASH_SPINNER_INTERVAL_MS = 200;
 const BASH_SPINNER_STATE_KEY = "__piToolDisplayBashSpinner";
+const BASH_SPINNER_TOOL_CALL_ID_KEY = "__piToolDisplayBashSpinnerToolCallId";
 
 interface BashCallArgs {
 	command?: string;
+	commandPrefix?: string;
+	shellPath?: string;
 	timeout?: number;
 }
 
@@ -22,15 +26,20 @@ interface BashSpinnerState {
 
 interface BashSpinnerStateCarrier {
 	[BASH_SPINNER_STATE_KEY]?: BashSpinnerState;
+	[BASH_SPINNER_TOOL_CALL_ID_KEY]?: string;
 }
 
 interface BashCallRenderContextLike {
 	executionStarted: boolean;
 	isPartial: boolean;
-	invalidate(): void;
+	invalidate?: () => void;
 	lastComponent?: unknown;
 	state?: unknown;
+	toolCallId?: string;
 }
+
+const spinnerStatesByToolCallId = new Map<string, BashSpinnerState>();
+let nextSyntheticToolCallId = 0;
 
 function toStateCarrier(value: unknown): BashSpinnerStateCarrier | undefined {
 	if (!value || typeof value !== "object") {
@@ -39,35 +48,57 @@ function toStateCarrier(value: unknown): BashSpinnerStateCarrier | undefined {
 	return value as BashSpinnerStateCarrier;
 }
 
-function getOrCreateSpinnerState(value: unknown): BashSpinnerState | undefined {
-	const carrier = toStateCarrier(value);
+function getSyntheticToolCallId(carrier: BashSpinnerStateCarrier | undefined): string | undefined {
 	if (!carrier) {
 		return undefined;
 	}
 
-	const existing = carrier[BASH_SPINNER_STATE_KEY];
-	if (existing) {
-		return existing;
+	if (!carrier[BASH_SPINNER_TOOL_CALL_ID_KEY]) {
+		carrier[BASH_SPINNER_TOOL_CALL_ID_KEY] = `state:${++nextSyntheticToolCallId}`;
 	}
-
-	const created: BashSpinnerState = { frameIndex: 0 };
-	carrier[BASH_SPINNER_STATE_KEY] = created;
-	return created;
+	return carrier[BASH_SPINNER_TOOL_CALL_ID_KEY];
 }
 
-function stopSpinner(state: BashSpinnerState | undefined): void {
-	if (!state?.timer) {
-		if (state) {
-			state.frameIndex = 0;
-			state.startedAt = undefined;
-		}
+function getToolCallId(context: BashCallRenderContextLike): string | undefined {
+	if (typeof context.toolCallId === "string" && context.toolCallId.trim().length > 0) {
+		return context.toolCallId;
+	}
+	return getSyntheticToolCallId(toStateCarrier(context.state));
+}
+
+function getOrCreateSpinnerState(
+	toolCallId: string | undefined,
+	carrier: BashSpinnerStateCarrier | undefined,
+): BashSpinnerState | undefined {
+	if (!toolCallId) {
+		return undefined;
+	}
+
+	let state = spinnerStatesByToolCallId.get(toolCallId);
+	if (!state) {
+		state = { frameIndex: 0 };
+		spinnerStatesByToolCallId.set(toolCallId, state);
+	}
+	if (carrier) {
+		carrier[BASH_SPINNER_STATE_KEY] = state;
+	}
+	return state;
+}
+
+function stopSpinner(toolCallId: string | undefined, state: BashSpinnerState | undefined): void {
+	if (!state) {
 		return;
 	}
 
-	clearInterval(state.timer);
-	state.timer = undefined;
+	if (state.timer) {
+		clearInterval(state.timer);
+		state.timer = undefined;
+	}
 	state.frameIndex = 0;
 	state.startedAt = undefined;
+	if (toolCallId) {
+		spinnerStatesByToolCallId.delete(toolCallId);
+	}
 }
 
 function formatElapsed(elapsedMs: number): string {
@@ -87,16 +118,37 @@ function formatElapsed(elapsedMs: number): string {
 	return `${hours}h ${minutes}m`;
 }
 
+function isDefaultShellPath(shellPath: string): boolean {
+	const normalized = shellPath.trim().replace(/\\/g, "/").toLowerCase();
+	const basename = normalized.split("/").pop() || normalized;
+	return basename === "bash" || basename === "cmd.exe";
+}
+
+function buildCommandDisplay(args: BashCallArgs): string {
+	const command =
+		typeof args.command === "string" && args.command.trim().length > 0
+			? args.command
+			: "...";
+	const prefix =
+		typeof args.commandPrefix === "string" && args.commandPrefix.trim().length > 0
+			? args.commandPrefix.trim()
+			: "";
+	return prefix ? `${prefix} ${command}` : command;
+}
+
 function buildBashCallText(
 	args: BashCallArgs,
 	theme: BashCallRenderTheme,
 	spinnerFrame?: string,
 	elapsedMs?: number,
 ): string {
-	const commandDisplay =
-		typeof args.command === "string" && args.command.trim().length > 0
-			? args.command
-			: "...";
+	const commandDisplay = buildCommandDisplay(args);
+	const shellSuffix =
+		typeof args.shellPath === "string" &&
+		args.shellPath.trim().length > 0 &&
+		!isDefaultShellPath(args.shellPath)
+			? theme.fg("muted", ` [shell: ${args.shellPath}]`)
+			: "";
 	const timeoutSuffix = args.timeout
 		? theme.fg("muted", ` (timeout ${args.timeout}s)`)
 		: "";
@@ -106,7 +158,7 @@ function buildBashCallText(
 			? theme.fg("muted", ` · ${formatElapsed(elapsedMs)}`)
 			: "";
 
-	return `${spinnerPrefix}${theme.fg("toolTitle", theme.bold("$"))} ${theme.fg("accent", commandDisplay)}${timeoutSuffix}${elapsedSuffix}`;
+	return `${spinnerPrefix}${theme.fg("toolTitle", theme.bold("$"))} ${theme.fg("accent", commandDisplay)}${shellSuffix}${timeoutSuffix}${elapsedSuffix}`;
 }
 
 export function renderBashCall(
@@ -115,13 +167,21 @@ export function renderBashCall(
 	context: BashCallRenderContextLike,
 ): Text {
 	const text = context.lastComponent instanceof Text ? context.lastComponent : new Text("", 0, 0);
-	const spinnerState = getOrCreateSpinnerState(context.state);
+	const carrier = toStateCarrier(context.state);
+	const toolCallId = getToolCallId(context);
+	const spinnerState = getOrCreateSpinnerState(toolCallId, carrier);
 	const shouldSpin = context.executionStarted && context.isPartial;
 
-	if (shouldSpin && spinnerState) {
+	if (!shouldSpin) {
+		stopSpinner(toolCallId, spinnerState);
+		text.setText(buildBashCallText(args, theme));
+		return text;
+	}
+
+	if (spinnerState) {
 		spinnerState.startedAt ??= Date.now();
-		if (!spinnerState.timer) {
-			spinnerState.timer = setInterval(() => {
+		if (!spinnerState.timer && typeof context.invalidate === "function") {
+			const timer = setInterval(() => {
 				spinnerState.frameIndex = (spinnerState.frameIndex + 1) % BASH_SPINNER_FRAMES.length;
 				text.setText(
 					buildBashCallText(
@@ -131,17 +191,20 @@ export function renderBashCall(
 						Date.now() - (spinnerState.startedAt ?? Date.now()),
 					),
 				);
-				context.invalidate();
+				context.invalidate?.();
 			}, BASH_SPINNER_INTERVAL_MS);
+			spinnerState.timer = timer;
+			registerTimer(timer);
+			registerCleanup(() => {
+				if (spinnerStatesByToolCallId.get(toolCallId || "") === spinnerState) {
+					stopSpinner(toolCallId, spinnerState);
+				}
+			});
 		}
 	}
 
-	if (!shouldSpin) {
-		stopSpinner(spinnerState);
-	}
-
-	const spinnerFrame = shouldSpin && spinnerState ? BASH_SPINNER_FRAMES[spinnerState.frameIndex] : undefined;
-	const elapsedMs = shouldSpin && spinnerState?.startedAt !== undefined
+	const spinnerFrame = spinnerState ? BASH_SPINNER_FRAMES[spinnerState.frameIndex] : undefined;
+	const elapsedMs = spinnerState?.startedAt !== undefined
 		? Date.now() - spinnerState.startedAt
 		: undefined;
 	text.setText(buildBashCallText(args, theme, spinnerFrame, elapsedMs));

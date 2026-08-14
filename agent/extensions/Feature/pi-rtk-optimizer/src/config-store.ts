@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { CONFIG_PATH } from "./constants.js";
+import { toRecord } from "./record-utils.js";
 import {
 	DEFAULT_RTK_INTEGRATION_CONFIG,
 	RTK_MODES,
@@ -40,19 +41,12 @@ function hasOwnProperty(source: Record<string, unknown>, key: string): boolean {
 	return Object.prototype.hasOwnProperty.call(source, key);
 }
 
-function toObject(value: unknown): Record<string, unknown> {
-	if (!value || typeof value !== "object" || Array.isArray(value)) {
-		return {};
-	}
-	return value as Record<string, unknown>;
-}
-
 export function normalizeRtkIntegrationConfig(raw: unknown): RtkIntegrationConfig {
-	const source = toObject(raw);
-	const outputCompactionSource = toObject(source.outputCompaction);
-	const readCompactionSource = toObject(outputCompactionSource.readCompaction);
-	const truncateSource = toObject(outputCompactionSource.truncate);
-	const smartTruncateSource = toObject(outputCompactionSource.smartTruncate);
+	const source = toRecord(raw);
+	const outputCompactionSource = toRecord(source.outputCompaction);
+	const readCompactionSource = toRecord(outputCompactionSource.readCompaction);
+	const truncateSource = toRecord(outputCompactionSource.truncate);
+	const smartTruncateSource = toRecord(outputCompactionSource.smartTruncate);
 	const hasReadCompaction = hasOwnProperty(outputCompactionSource, "readCompaction");
 	const legacyReadCompactionFallback = !hasReadCompaction;
 	const sourceFilteringFallback = legacyReadCompactionFallback
@@ -177,7 +171,7 @@ export function ensureConfigExists(configPath = CONFIG_PATH): EnsureConfigResult
 
 export function loadRtkIntegrationConfig(configPath = CONFIG_PATH): ConfigLoadResult {
 	if (!existsSync(configPath)) {
-		return { config: { ...DEFAULT_RTK_INTEGRATION_CONFIG } };
+		return { config: structuredClone(DEFAULT_RTK_INTEGRATION_CONFIG) };
 	}
 
 	try {
@@ -187,7 +181,7 @@ export function loadRtkIntegrationConfig(configPath = CONFIG_PATH): ConfigLoadRe
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		return {
-			config: { ...DEFAULT_RTK_INTEGRATION_CONFIG },
+			config: structuredClone(DEFAULT_RTK_INTEGRATION_CONFIG),
 			warning: `Failed to parse ${configPath}: ${message}`,
 		};
 	}
@@ -210,8 +204,10 @@ export function saveRtkIntegrationConfig(
 			if (existsSync(tmpPath)) {
 				unlinkSync(tmpPath);
 			}
-		} catch {
-			// Ignore cleanup failures.
+		} catch (cleanupError) {
+			// Best-effort cleanup: a stale tmp-file removal failure must not
+			// mask the original save error reported below.
+			void cleanupError;
 		}
 
 		const message = error instanceof Error ? error.message : String(error);

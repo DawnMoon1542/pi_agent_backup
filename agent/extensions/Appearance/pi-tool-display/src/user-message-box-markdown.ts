@@ -1,3 +1,5 @@
+import { isRecord } from "./tool-metadata.js";
+
 interface MarkdownLike {
   text?: unknown;
   theme?: unknown;
@@ -12,10 +14,6 @@ export interface UserMessageMarkdownState {
   text: string;
   theme: unknown;
   defaultTextStyle?: Record<string, unknown>;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function sanitizeDefaultTextStyle(value: unknown): Record<string, unknown> | undefined {

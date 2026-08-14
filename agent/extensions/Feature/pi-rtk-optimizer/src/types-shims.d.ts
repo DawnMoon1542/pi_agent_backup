@@ -27,6 +27,8 @@ declare module "@earendil-works/pi-tui" {
 
 	export class SettingsList {
 		constructor(...args: unknown[]);
+		render(width: number): string[];
+		invalidate(): void;
 		handleInput(data: string): void;
 		updateValue(id: string, value: string): void;
 	}
@@ -158,6 +160,12 @@ declare module "node:assert/strict" {
 	};
 
 	export default assert;
+}
+
+declare module "node:test" {
+	export const mock: {
+		module(specifier: string, options: { namedExports?: Record<string, unknown>; defaultExport?: unknown }): void;
+	};
 }
 
 declare module "bun:test" {

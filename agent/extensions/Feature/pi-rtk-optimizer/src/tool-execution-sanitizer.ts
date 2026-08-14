@@ -1,31 +1,13 @@
-import { toRecord } from "./record-utils.js";
-import { sanitizeRtkEmojiOutput, stripAnsiFast, stripRtkHookWarnings } from "./techniques/index.js";
-
-interface ToolResultTextBlock {
-	type: string;
-	text?: string;
-	[key: string]: unknown;
-}
+import { mapTextContentBlocks, toRecord } from "./record-utils.js";
+import { stripAnsiFast } from "./techniques/ansi.js";
 
 export interface StreamingBashExecutionSanitizationResult {
 	changed: boolean;
 	result: unknown;
 }
 
-function sanitizeStreamingBashText(text: string, command: string | undefined | null): string {
-	let nextText = stripAnsiFast(text);
-
-	const withoutRtkHookWarnings = stripRtkHookWarnings(nextText, command);
-	if (withoutRtkHookWarnings !== null) {
-		nextText = withoutRtkHookWarnings;
-	}
-
-	const withoutRtkEmoji = sanitizeRtkEmojiOutput(nextText, command);
-	if (withoutRtkEmoji !== null) {
-		nextText = withoutRtkEmoji;
-	}
-
-	return nextText;
+function sanitizeStreamingBashText(text: string, _command: string | undefined | null): string {
+	return stripAnsiFast(text);
 }
 
 /**
@@ -38,32 +20,16 @@ export function sanitizeStreamingBashExecutionResult(
 	command: string | undefined | null,
 ): StreamingBashExecutionSanitizationResult {
 	const resultRecord = toRecord(result);
-	const sourceContent = Array.isArray(resultRecord.content) ? resultRecord.content : null;
+	const sourceContent = Array.isArray(resultRecord.content)
+		? (resultRecord.content as unknown[])
+		: null;
 	if (!sourceContent || sourceContent.length === 0) {
 		return { changed: false, result };
 	}
 
-	let changed = false;
-	const nextContent = sourceContent.map((block) => {
-		if (!block || typeof block !== "object" || Array.isArray(block)) {
-			return block;
-		}
-
-		const contentBlock = block as ToolResultTextBlock;
-		if (contentBlock.type !== "text" || typeof contentBlock.text !== "string") {
-			return block;
-		}
-
-		const sanitizedText = sanitizeStreamingBashText(contentBlock.text, command);
-		if (sanitizedText === contentBlock.text) {
-			return block;
-		}
-
-		changed = true;
-		return {
-			...contentBlock,
-			text: sanitizedText,
-		};
+	const { changed, mapped: nextContent } = mapTextContentBlocks(sourceContent, (block) => {
+		const sanitizedText = sanitizeStreamingBashText(block.text, command);
+		return sanitizedText !== block.text ? sanitizedText : null;
 	});
 
 	if (!changed) {

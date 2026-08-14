@@ -1,12 +1,15 @@
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { resolvePiAgentDir } from "./agent-dir.js";
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
 	BUILT_IN_TOOL_OVERRIDE_NAMES,
 	BASH_OUTPUT_MODES,
+	CUSTOM_TOOL_OUTPUT_MODES,
+	CUSTOM_TOOL_OVERRIDE_KINDS,
 	DEFAULT_TOOL_DISPLAY_CONFIG,
 	type ConfigLoadResult,
 	type ConfigSaveResult,
+	type CustomToolOverrideConfig,
 	DIFF_INDICATOR_MODES,
 	DIFF_VIEW_MODES,
 	MCP_OUTPUT_MODES,
@@ -17,7 +20,7 @@ import {
 } from "./types.js";
 import { toRecord } from "./tool-metadata.js";
 
-const CONFIG_DIR = join(getAgentDir(), "extensions", "Appearance", "pi-tool-display");
+const CONFIG_DIR = join(resolvePiAgentDir(), "extensions", "Appearance", "pi-tool-display");
 const CONFIG_FILE = join(CONFIG_DIR, "config.json");
 
 interface LegacyToolDisplayConfigSource extends Partial<ToolDisplayConfig> {
@@ -79,11 +82,47 @@ function toDiffIndicatorMode(value: unknown): ToolDisplayConfig["diffIndicatorMo
 		: DEFAULT_TOOL_DISPLAY_CONFIG.diffIndicatorMode;
 }
 
+export function cloneCustomToolOverrides(
+	overrides: Record<string, CustomToolOverrideConfig>,
+): Record<string, CustomToolOverrideConfig> {
+	return Object.fromEntries(
+		Object.entries(overrides).map(([toolName, override]) => [
+			toolName,
+			{ ...override },
+		]),
+	);
+}
+
 function cloneDefaultConfig(): ToolDisplayConfig {
 	return {
 		...DEFAULT_TOOL_DISPLAY_CONFIG,
 		registerToolOverrides: { ...DEFAULT_TOOL_DISPLAY_CONFIG.registerToolOverrides },
+		customToolOverrides: cloneCustomToolOverrides(DEFAULT_TOOL_DISPLAY_CONFIG.customToolOverrides),
 	};
+}
+
+let cachedConfigFile: string | undefined;
+let cachedConfigFingerprint: string | undefined;
+let cachedConfigResult: ConfigLoadResult | undefined;
+
+function cloneConfig(config: ToolDisplayConfig): ToolDisplayConfig {
+	return normalizeToolDisplayConfig(config);
+}
+
+function cloneLoadResult(result: ConfigLoadResult): ConfigLoadResult {
+	return {
+		...result,
+		config: cloneConfig(result.config),
+	};
+}
+
+function getConfigFingerprint(configFile: string): string {
+	try {
+		const stats = statSync(configFile);
+		return `${stats.mtimeMs}:${stats.size}`;
+	} catch {
+		return "missing";
+	}
 }
 
 function normalizeToolOverrideOwnership(
@@ -103,22 +142,78 @@ function normalizeToolOverrideOwnership(
 	return overrides;
 }
 
+function isBuiltInToolOverrideName(toolName: string): boolean {
+	return (BUILT_IN_TOOL_OVERRIDE_NAMES as readonly string[]).includes(toolName);
+}
+
+export function toCustomToolOverrideKind(value: unknown): CustomToolOverrideConfig["kind"] {
+	return CUSTOM_TOOL_OVERRIDE_KINDS.includes(value as CustomToolOverrideConfig["kind"])
+		? (value as CustomToolOverrideConfig["kind"])
+		: "generic";
+}
+
+export function toCustomToolOutputMode(value: unknown): CustomToolOverrideConfig["outputMode"] {
+	return CUSTOM_TOOL_OUTPUT_MODES.includes(value as CustomToolOverrideConfig["outputMode"])
+		? (value as CustomToolOverrideConfig["outputMode"])
+		: "summary";
+}
+
+export function normalizeCustomToolOverrideEntry(rawEntry: unknown): CustomToolOverrideConfig | undefined {
+	if (typeof rawEntry === "boolean") {
+		return {
+			enabled: rawEntry,
+			kind: "generic",
+			outputMode: "summary",
+		};
+	}
+
+	if (!rawEntry || typeof rawEntry !== "object" || Array.isArray(rawEntry)) {
+		return undefined;
+	}
+
+	const source = toRecord(rawEntry);
+	return {
+		enabled: toBoolean(source.enabled, true),
+		kind: toCustomToolOverrideKind(source.kind),
+		outputMode: toCustomToolOutputMode(source.outputMode),
+	};
+}
+
+function normalizeCustomToolOverrides(rawOverrides: unknown): Record<string, CustomToolOverrideConfig> {
+	const source = toRecord(rawOverrides);
+	const overrides: Record<string, CustomToolOverrideConfig> = {};
+
+	for (const [rawToolName, rawEntry] of Object.entries(source)) {
+		const toolName = rawToolName.trim();
+		if (!toolName || isBuiltInToolOverrideName(toolName)) {
+			continue;
+		}
+
+		const normalized = normalizeCustomToolOverrideEntry(rawEntry);
+		if (!normalized) {
+			continue;
+		}
+
+		overrides[toolName] = normalized;
+	}
+
+	return overrides;
+}
+
 export function normalizeToolDisplayConfig(raw: unknown): ToolDisplayConfig {
 	const source =
 		typeof raw === "object" && raw !== null ? (raw as LegacyToolDisplayConfigSource) : ({} as LegacyToolDisplayConfigSource);
 
 	return {
+		enabled: toBoolean(source.enabled, DEFAULT_TOOL_DISPLAY_CONFIG.enabled),
 		registerToolOverrides: normalizeToolOverrideOwnership(
 			source.registerToolOverrides,
 			source.registerReadToolOverride,
 		),
+		customToolOverrides: normalizeCustomToolOverrides(source.customToolOverrides),
 		enableNativeUserMessageBox: toBoolean(
 			source.enableNativeUserMessageBox,
 			DEFAULT_TOOL_DISPLAY_CONFIG.enableNativeUserMessageBox,
-		),
-		enableThinkingLabels: toBoolean(
-			(source as Record<string, unknown>).enableThinkingLabels,
-			DEFAULT_TOOL_DISPLAY_CONFIG.enableThinkingLabels,
 		),
 		readOutputMode: toReadOutputMode(source.readOutputMode),
 		searchOutputMode: toSearchOutputMode(source.searchOutputMode),
@@ -146,21 +241,32 @@ export function normalizeToolDisplayConfig(raw: unknown): ToolDisplayConfig {
 }
 
 export function loadToolDisplayConfig(configFile = CONFIG_FILE): ConfigLoadResult {
-	if (!existsSync(configFile)) {
-		return { config: cloneDefaultConfig() };
+	const fingerprint = getConfigFingerprint(configFile);
+	if (cachedConfigResult && cachedConfigFile === configFile && cachedConfigFingerprint === fingerprint) {
+		return cloneLoadResult(cachedConfigResult);
 	}
 
-	try {
-		const rawText = readFileSync(configFile, "utf-8");
-		const rawConfig = JSON.parse(rawText) as unknown;
-		return { config: normalizeToolDisplayConfig(rawConfig) };
-	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		return {
-			config: cloneDefaultConfig(),
-			error: `Failed to parse ${configFile}: ${message}`,
-		};
+	let result: ConfigLoadResult;
+	if (!existsSync(configFile)) {
+		result = { config: cloneDefaultConfig() };
+	} else {
+		try {
+			const rawText = readFileSync(configFile, "utf-8");
+			const rawConfig = JSON.parse(rawText) as unknown;
+			result = { config: normalizeToolDisplayConfig(rawConfig) };
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			result = {
+				config: cloneDefaultConfig(),
+				error: `Failed to parse ${configFile}: ${message}`,
+			};
+		}
 	}
+
+	cachedConfigFile = configFile;
+	cachedConfigFingerprint = fingerprint;
+	cachedConfigResult = cloneLoadResult(result);
+	return result;
 }
 
 export function saveToolDisplayConfig(config: ToolDisplayConfig, configFile = CONFIG_FILE): ConfigSaveResult {
@@ -171,14 +277,18 @@ export function saveToolDisplayConfig(config: ToolDisplayConfig, configFile = CO
 		mkdirSync(dirname(configFile), { recursive: true });
 		writeFileSync(tmpFile, `${JSON.stringify(normalized, null, 2)}\n`, "utf-8");
 		renameSync(tmpFile, configFile);
+		cachedConfigFile = undefined;
+		cachedConfigFingerprint = undefined;
+		cachedConfigResult = undefined;
 		return { success: true };
 	} catch (error) {
 		try {
 			if (existsSync(tmpFile)) {
 				unlinkSync(tmpFile);
 			}
-		} catch {
+		} catch (cleanupError) {
 			// Ignore cleanup errors.
+			void cleanupError;
 		}
 		const message = error instanceof Error ? error.message : String(error);
 		return {

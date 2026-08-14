@@ -1,4 +1,5 @@
-import { DEFAULT_TOOL_DISPLAY_CONFIG, type ToolDisplayConfig } from "./types.js";
+import { cloneCustomToolOverrides } from "./config-store.js";
+import { DEFAULT_TOOL_DISPLAY_CONFIG, type CustomToolOverrideConfig, type ToolDisplayConfig } from "./types.js";
 
 export const TOOL_DISPLAY_PRESETS = ["opencode", "balanced", "verbose"] as const;
 export type ToolDisplayPreset = (typeof TOOL_DISPLAY_PRESETS)[number];
@@ -40,9 +41,28 @@ function toolOverrideOwnershipEqual(a: ToolDisplayConfig, b: ToolDisplayConfig):
 	);
 }
 
+function customToolOverridesEqual(a: ToolDisplayConfig, b: ToolDisplayConfig): boolean {
+	const aEntries = Object.entries(a.customToolOverrides).sort(([left], [right]) => left.localeCompare(right));
+	const bEntries = Object.entries(b.customToolOverrides).sort(([left], [right]) => left.localeCompare(right));
+	if (aEntries.length !== bEntries.length) {
+		return false;
+	}
+
+	return aEntries.every(([toolName, override], index) => {
+		const [otherToolName, otherOverride] = bEntries[index];
+		return (
+			toolName === otherToolName &&
+			override.enabled === otherOverride.enabled &&
+			override.kind === otherOverride.kind &&
+			override.outputMode === otherOverride.outputMode
+		);
+	});
+}
+
 function configsEqual(a: ToolDisplayConfig, b: ToolDisplayConfig): boolean {
 	return (
 		toolOverrideOwnershipEqual(a, b) &&
+		customToolOverridesEqual(a, b) &&
 		a.enableNativeUserMessageBox === b.enableNativeUserMessageBox &&
 		a.readOutputMode === b.readOutputMode &&
 		a.searchOutputMode === b.searchOutputMode &&
@@ -66,6 +86,7 @@ export function getToolDisplayPresetConfig(preset: ToolDisplayPreset): ToolDispl
 	return {
 		...config,
 		registerToolOverrides: { ...config.registerToolOverrides },
+		customToolOverrides: cloneCustomToolOverrides(config.customToolOverrides),
 	};
 }
 
