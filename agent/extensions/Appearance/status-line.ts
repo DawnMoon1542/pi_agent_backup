@@ -431,6 +431,7 @@ export default function (pi: ExtensionAPI) {
     if (!statusVisible) {
       ctx.ui.setFooter(undefined);
       ctx.ui.setWidget("status-line-which-key", undefined);
+      ctx.ui.setWorkingVisible(true);
       return;
     }
     ctx.ui.setFooter((tui) => {
@@ -445,6 +446,7 @@ export default function (pi: ExtensionAPI) {
         },
       };
     });
+    ctx.ui.setWorkingVisible(false);
     ctx.ui.setStatus("status-widget", undefined);
     ctx.ui.setWidget("status-widget", undefined);
     installShortcutStateDetector();
@@ -553,6 +555,7 @@ export default function (pi: ExtensionAPI) {
       currentCtx.ui.setFooter(undefined);
       currentCtx.ui.setWidget("status-line-which-key", undefined);
       currentCtx.ui.setStatus("status-widget", undefined);
+      currentCtx.ui.setWorkingVisible(true);
     }
   });
 
@@ -670,6 +673,7 @@ export default function (pi: ExtensionAPI) {
     offShortcutStateInput?.();
     offShortcutStateInput = undefined;
     ctx.ui.setFooter(undefined);
+    ctx.ui.setWorkingVisible(true);
     ctx.ui.setStatus("status-widget", undefined);
     ctx.ui.setWidget("status-widget", undefined);
     ctx.ui.setWidget("status-line-which-key", undefined);
