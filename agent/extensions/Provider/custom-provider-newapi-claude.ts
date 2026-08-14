@@ -15,6 +15,7 @@ export default async function (pi: ExtensionAPI) {
         cost: { input: 5.0, output: 25.0, cacheRead: 0.5, cacheWrite: 6.25 },
         contextWindow: 1_000_000,
         maxTokens: 128_000,
+        compat: { forceAdaptiveThinking: true },
       },
       {
         id: "claude-opus-4-7",
@@ -24,6 +25,7 @@ export default async function (pi: ExtensionAPI) {
         cost: { input: 5.0, output: 25.0, cacheRead: 0.5, cacheWrite: 6.25 },
         contextWindow: 200_000,
         maxTokens: 128_000,
+        compat: { forceAdaptiveThinking: true },
       },
       {
         id: "claude-opus-4-6",
@@ -33,6 +35,7 @@ export default async function (pi: ExtensionAPI) {
         cost: { input: 5.0, output: 25.0, cacheRead: 0.5, cacheWrite: 6.25 },
         contextWindow: 200_000,
         maxTokens: 128_000,
+        compat: { forceAdaptiveThinking: true },
       },
       {
         id: "claude-sonnet-4-6",
@@ -42,6 +45,7 @@ export default async function (pi: ExtensionAPI) {
         cost: { input: 3.0, output: 15.0, cacheRead: 0.3, cacheWrite: 3.75 },
         contextWindow: 200_000,
         maxTokens: 128_000,
+        compat: { forceAdaptiveThinking: true },
       },
       {
         id: "deepseek-v4-pro",

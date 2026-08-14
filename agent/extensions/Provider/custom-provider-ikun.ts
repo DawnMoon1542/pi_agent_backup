@@ -15,6 +15,7 @@ export default async function (pi: ExtensionAPI) {
         cost: { input: 5.5, output: 27.5, cacheRead: 0.55, cacheWrite: 6.875 },
         contextWindow: 200_000,
         maxTokens: 128_000,
+        compat: { forceAdaptiveThinking: true },
       },
       {
         id: "claude-opus-4-6",
@@ -24,6 +25,7 @@ export default async function (pi: ExtensionAPI) {
         cost: { input: 5.5, output: 27.5, cacheRead: 0.55, cacheWrite: 6.875 },
         contextWindow: 200_000,
         maxTokens: 128_000,
+        compat: { forceAdaptiveThinking: true },
       },
     ],
   });
