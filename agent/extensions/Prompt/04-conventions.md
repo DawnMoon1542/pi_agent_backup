@@ -9,7 +9,7 @@
 - 禁止使用 `apply_patch` 命令。
 - 除非确有必要,避免编写大量无实际用途的文档,例如"修改总结"。
 - Python 代码必须使用类型注解。
-- Python 项目按测试驱动开发组织实现:先写 pytest 覆盖正常情况、边界情况和异常情况,再小步实现,测试通过后再整理代码。
+- Python 项目按改动影响选择验证方式:行为变更优先补充针对性回归测试,纯文档、静态资源、格式化和无行为配置不编写虚假测试。
 - pytest 与 py_compile 使用以下形式:
 
 ```bash
@@ -24,3 +24,19 @@ uv run --with pytest python -m pytest
 - 公共函数、类、模块提供简洁 docstring,说明用途、参数和返回值。
 - 复杂算法保留必要步骤说明,帮助维护者理解关键判断。
 - 临时方案使用 `TODO:` 或 `FIXME:` 标记,并说明采用该方案的原因。
+
+## 技能路由
+
+同一请求命中多个技能时,先按交付格式和任务性质选择一个主技能,再按主技能明确引用的依赖加载辅助技能。默认路由如下:
+
+- `PPTX` 或 Google Slides: `presentations`
+- 技术演示或代码讲解网页幻灯片: `slidev`
+- 横向翻页单文件 HTML 幻灯片: `guizang-ppt-skill`
+- PDF 阅读、创建、表单或版式检查: `pdf`
+- 海报、艺术作品或静态视觉设计: `canvas-design`
+- 简历、一页纸、白皮书、编辑型 PDF 或产品落地页: `kami`
+- 网站项目且存在 `.openai/hosting.json`: `sites-building`,发布操作再加载 `sites-hosting`
+- 普通事实检索: `search-layer`
+- URL 转 Markdown: `content-extract`;只有解析失败或需要高保真 OCR、表格、公式时再加载 `mineru-extract`
+
+已有项目的技术栈和用户明确指定的格式优先于默认路由。
